@@ -81,7 +81,10 @@ impl Capture {
                 .borrow_mut()
                 .set_state_callback(Some(Box::new(move || {
                     let Some(st) = st.upgrade() else { return };
-                    let state = st.borrow().get_state();
+                    // Can fire synchronously inside connect_*, while the stream is
+                    // borrowed; the later Ready/Failed transitions are what matter.
+                    let Ok(st) = st.try_borrow() else { return };
+                    let state = st.get_state();
                     let mut sh = sh.borrow_mut();
                     match state {
                         State::Ready => sh.state = CaptureState::Running,
@@ -102,7 +105,8 @@ impl Capture {
                 .borrow_mut()
                 .set_read_callback(Some(Box::new(move |_len| {
                     let Some(st) = st.upgrade() else { return };
-                    drain(&mut st.borrow_mut(), &mut sh.borrow_mut());
+                    let Ok(mut st) = st.try_borrow_mut() else { return };
+                    drain(&mut st, &mut sh.borrow_mut());
                 })));
         }
 
@@ -179,20 +183,19 @@ impl Capture {
                 .borrow_mut()
                 .set_write_callback(Some(Box::new(move |writable| {
                     let Some(st) = st.upgrade() else { return };
+                    let Ok(mut st) = st.try_borrow_mut() else { return };
                     let mut p = pos.borrow_mut();
                     let n = writable.min(bytes.len() - *p);
                     if n > 0 {
                         let _ = st
-                            .borrow_mut()
                             .write_copy(&bytes[*p..*p + n], 0, pa::stream::SeekMode::Relative);
                         *p += n;
                     }
                     if *p >= bytes.len() {
                         // All data queued; drain lets the tail play out and
                         // then terminates the stream (see state callback).
-                        let mut s = st.borrow_mut();
-                        s.set_write_callback(None);
-                        let _ = s.drain(None);
+                        st.set_write_callback(None);
+                        let _ = st.drain(None);
                     }
                 })));
         }
@@ -203,7 +206,10 @@ impl Capture {
                 .borrow_mut()
                 .set_state_callback(Some(Box::new(move || {
                     let Some(st) = st.upgrade() else { return };
-                    let state = st.borrow().get_state();
+                    // Can fire synchronously inside connect_*, while the stream is
+                    // borrowed; the later Ready/Failed transitions are what matter.
+                    let Ok(st) = st.try_borrow() else { return };
+                    let state = st.get_state();
                     let mut sh = sh.borrow_mut();
                     match state {
                         State::Failed => {

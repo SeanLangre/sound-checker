@@ -70,6 +70,12 @@ pub fn build(app: &adw::Application) {
     let ui = Ui::new(app);
     ui.connect();
     ui.window.present();
+    // Every callback holds only a weak reference, so give the window the one
+    // strong one; it is released when the window is destroyed.
+    let keep_alive = Rc::clone(&ui);
+    ui.window.connect_destroy(move |_| {
+        let _ = &keep_alive;
+    });
 }
 
 fn label(text: &str) -> gtk::Label {
