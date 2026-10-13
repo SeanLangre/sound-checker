@@ -179,21 +179,129 @@ fn pactl(args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
-/// The default sink and source, read before WirePlumber restarts.
-fn defaults() -> (String, String) {
-    (pactl(&["get-default-sink"]), pactl(&["get-default-source"]))
+/// Where playback and recording streams were routed, by device name.
+#[derive(Default)]
+struct Routing {
+    sink: String,
+    source: String,
+    /// (stream id, sink name)
+    playback: Vec<(String, String)>,
+    /// (stream id, source name)
+    capture: Vec<(String, String)>,
+    /// (card name, active profile)
+    profiles: Vec<(String, String)>,
 }
 
-/// A restarted WirePlumber re-picks its defaults and can bypass virtual
-/// devices (e.g. EasyEffects), so put the previous ones back.
-fn restore_defaults((sink, source): &(String, String)) {
+/// `pactl list short <what>` as rows of tab-separated fields.
+fn short(what: &str) -> Vec<Vec<String>> {
+    pactl(&["list", "short", what])
+        .lines()
+        .map(|l| l.split('\t').map(str::to_string).collect())
+        .collect()
+}
+
+/// Streams of `streams` ("sink-inputs"/"source-outputs") with the name of
+/// the device ("sinks"/"sources") each one is attached to.
+fn stream_devices(streams: &str, devices: &str) -> Vec<(String, String)> {
+    let names: std::collections::HashMap<String, String> = short(devices)
+        .into_iter()
+        .filter_map(|r| Some((r.first()?.clone(), r.get(1)?.clone())))
+        .collect();
+    short(streams)
+        .into_iter()
+        .filter_map(|r| Some((r.first()?.clone(), names.get(r.get(1)?)?.clone())))
+        .collect()
+}
+
+fn routing() -> Routing {
+    Routing {
+        sink: pactl(&["get-default-sink"]),
+        source: pactl(&["get-default-source"]),
+        playback: stream_devices("sink-inputs", "sinks"),
+        capture: stream_devices("source-outputs", "sources"),
+        profiles: card_profiles(),
+    }
+}
+
+fn card_profiles() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut card = None;
+    for line in pactl(&["list", "cards"]).lines() {
+        let line = line.trim();
+        if let Some(n) = line.strip_prefix("Name: ") {
+            card = Some(n.to_string());
+        } else if let (Some(p), Some(c)) = (line.strip_prefix("Active Profile: "), &card) {
+            out.push((c.clone(), p.to_string()));
+        }
+    }
+    out
+}
+
+/// Put cards back on their old profile. A Bluetooth headset that came back
+/// without its music link is reconnected once to get it. Returns the changes.
+fn restore_profiles(before: &Routing, allow_reconnect: bool) -> Vec<String> {
+    let mut changed = Vec::new();
+    for (card, want) in &before.profiles {
+        let now = card_profiles();
+        let current = now.iter().find(|(c, _)| c == card).map(|(_, p)| p.as_str());
+        if current.is_none() || current == Some(want.as_str()) {
+            continue;
+        }
+        pactl(&["set-card-profile", card, want]);
+        let ok = |n: &[(String, String)]| n.iter().any(|(c, p)| c == card && p == want);
+        if ok(&card_profiles()) {
+            changed.push(format!("set-card-profile {card} {want}"));
+        } else if allow_reconnect && card.starts_with("bluez_card.") {
+            let mac = card.trim_start_matches("bluez_card.").replace('_', ":");
+            let _ = Command::new("bluetoothctl").args(["disconnect", &mac]).output();
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            let _ = Command::new("bluetoothctl").args(["connect", &mac]).output();
+            std::thread::sleep(std::time::Duration::from_secs(4));
+            pactl(&["set-card-profile", card, want]);
+            changed.push(format!("reconnected {mac}, set-card-profile {card} {want}"));
+        }
+    }
+    changed
+}
+
+/// A restarted WirePlumber re-picks its defaults and can move streams onto
+/// other devices (bypassing EasyEffects, say), so put everything back.
+/// Returns what it had to change.
+fn restore(before: &Routing) -> Vec<String> {
+    let mut changed = Vec::new();
+    let exists = |list: &str, name: &str| short(list).iter().any(|r| r.get(1).map(String::as_str) == Some(name));
     for (get, set, list, name) in [
-        ("get-default-sink", "set-default-sink", "sinks", sink),
-        ("get-default-source", "set-default-source", "sources", source),
+        ("get-default-sink", "set-default-sink", "sinks", &before.sink),
+        ("get-default-source", "set-default-source", "sources", &before.source),
     ] {
-        let exists = pactl(&["list", "short", list]).lines().any(|l| l.split('\t').nth(1) == Some(name));
-        if !name.is_empty() && exists && pactl(&[get]) != *name {
+        if !name.is_empty() && exists(list, name) && pactl(&[get]) != *name {
             pactl(&[set, name]);
+            changed.push(format!("{set} {name}"));
+        }
+    }
+    for (streams, devices, mv, old) in [
+        ("sink-inputs", "sinks", "move-sink-input", &before.playback),
+        ("source-outputs", "sources", "move-source-output", &before.capture),
+    ] {
+        let now = stream_devices(streams, devices);
+        for (id, want) in old {
+            let moved = now.iter().find(|(i, _)| i == id).is_some_and(|(_, dev)| dev != want);
+            if moved && exists(devices, want) {
+                pactl(&[mv, id, want]);
+                changed.push(format!("{mv} {id} {want}"));
+            }
+        }
+    }
+    changed
+}
+
+/// Append to `restart.log` next to the state file, for diagnosing restarts.
+fn log(line: &str) {
+    use std::io::Write;
+    if let Some(dir) = state_path().parent() {
+        let _ = fs::create_dir_all(dir);
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(dir.join("restart.log")) {
+            let _ = writeln!(f, "{line}");
         }
     }
 }
@@ -202,7 +310,8 @@ fn restore_defaults((sink, source): &(String, String)) {
 /// devices that were connected before. Blocking; run off the main thread.
 pub fn restart() -> Result<(), String> {
     let before = connected_bluetooth();
-    let saved_defaults = defaults();
+    let saved = routing();
+    log(&format!("restart: default sink {:?}, source {:?}, {} playback and {} capture streams", saved.sink, saved.source, saved.playback.len(), saved.capture.len()));
     let out = Command::new("systemctl")
         .args(["--user", "restart", "wireplumber.service"])
         .output()
@@ -210,15 +319,24 @@ pub fn restart() -> Result<(), String> {
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
-    // Let it enumerate devices again before touching the defaults.
-    std::thread::sleep(std::time::Duration::from_secs(2));
-    restore_defaults(&saved_defaults);
+    // Let it enumerate devices again, then undo what it moved; a second pass
+    // catches anything that settles late.
+    for pass in 1..=2 {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let mut changed = restore_profiles(&saved, pass == 2);
+        changed.extend(restore(&saved));
+        log(&format!("restore pass {pass}: {}", if changed.is_empty() { "nothing to change".into() } else { changed.join("; ") }));
+    }
     if !before.is_empty() {
         // Give devices a moment to come back by themselves first.
         std::thread::sleep(std::time::Duration::from_secs(1));
         for mac in before.iter().filter(|m| !is_connected(m)) {
             let _ = Command::new("bluetoothctl").args(["connect", mac]).output();
         }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let mut changed = restore_profiles(&saved, false);
+        changed.extend(restore(&saved));
+        log(&format!("restore after bluetooth reconnect: {}", changed.join("; ")));
     }
     Ok(())
 }

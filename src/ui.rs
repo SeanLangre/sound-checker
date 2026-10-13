@@ -63,11 +63,9 @@ struct State {
     selected: Option<String>,
     /// When set, the pane shows this output instead of `selected`.
     selected_sink: Option<String>,
-    /// The input being captured and metered; changed only by the test button.
-    testing: Option<String>,
-    /// What the running capture was started with, to detect spec changes.
-    capture_spec: Option<(String, u32, u8)>,
-    capture: Option<Capture>,
+    /// One capture per unmuted input and per output monitor, keyed by source name,
+    /// with the (rate, channels) it was started with.
+    captures: std::collections::HashMap<String, ((u32, u8), Capture)>,
     backend: Option<Rc<Backend>>,
     activity: ActivityMonitor,
     names: Names,
@@ -87,6 +85,22 @@ struct Target {
     bus: Option<String>,
     is_default: bool,
     output: bool,
+}
+
+impl State {
+    /// Name of the source the pane's meters use: the input itself, or the
+    /// monitor of the selected output.
+    fn viewed_meter_source(&self) -> Option<String> {
+        match &self.selected_sink {
+            Some(sink) => Some(format!("{sink}.monitor")),
+            None => self.selected.clone(),
+        }
+    }
+
+    /// The capture belonging to the device shown in the pane.
+    fn viewed_capture(&self) -> Option<&Capture> {
+        self.captures.get(&self.viewed_meter_source()?).map(|(_, c)| c)
+    }
 }
 
 impl Target {
@@ -161,7 +175,6 @@ struct Ui {
     record_btn: gtk::Button,
     play_btn: gtk::Button,
     record_label: gtk::Label,
-    test_btn: gtk::Button,
     mute_btn: gtk::Button,
     rename_btn: gtk::Button,
     default_btn: gtk::Button,
@@ -176,6 +189,8 @@ struct Ui {
 
     meter_data: Rc<RefCell<MeterData>>,
     wave_data: Rc<RefCell<Vec<(f32, f32)>>>,
+    /// The meter source the meters are currently laid out for.
+    meter_for: RefCell<Option<String>>,
     state: RefCell<State>,
 }
 
@@ -311,12 +326,6 @@ impl Ui {
         details.add_css_class("monospace");
         let expander = gtk::Expander::builder().label("Device details").child(&details).build();
 
-        let test_btn = gtk::Button::builder()
-            .label("Test this input")
-            .halign(gtk::Align::Start)
-            .css_classes(["suggested-action", "pill"])
-            .visible(false)
-            .build();
         let capture_widgets: Vec<gtk::Widget> = [
             meters.upcast_ref::<gtk::Widget>(),
             stats.upcast_ref(),
@@ -340,7 +349,6 @@ impl Ui {
         for w in [
             title.upcast_ref::<gtk::Widget>(),
             warn_row.upcast_ref(),
-            test_btn.upcast_ref(),
             meters.upcast_ref(),
             stats.upcast_ref(),
             wave.upcast_ref(),
@@ -427,7 +435,6 @@ impl Ui {
             record_btn,
             play_btn,
             record_label,
-            test_btn,
             mute_btn,
             rename_btn,
             default_btn,
@@ -440,14 +447,13 @@ impl Ui {
             toasts,
             meter_data: Rc::new(RefCell::new(MeterData::default())),
             wave_data: Rc::new(RefCell::new(Vec::new())),
+            meter_for: RefCell::new(None),
             state: RefCell::new(State {
                 model: Model::default(),
                 rows: Vec::new(),
                 selected: None,
                 selected_sink: None,
-                testing: None,
-                capture_spec: None,
-                capture: None,
+                captures: Default::default(),
                 backend: None,
                 activity: ActivityMonitor::default(),
                 names: names::load(),
@@ -471,9 +477,7 @@ impl Ui {
     fn connect(self: &Rc<Self>) {
         {
             let mut st = self.state.borrow_mut();
-            st.capture = None;
-            st.capture_spec = None;
-            st.testing = None;
+            st.captures.clear();
             st.backend = None;
             st.activity.clear();
         }
@@ -608,16 +612,6 @@ impl Ui {
             }
         });
         let w = weak.clone();
-        self.test_btn.connect_clicked(move |_| {
-            if let Some(ui) = w.upgrade() {
-                {
-                    let mut st = ui.state.borrow_mut();
-                    st.testing = st.selected.clone();
-                }
-                ui.sync_selection();
-            }
-        });
-        let w = weak.clone();
         self.disable_btn.connect_clicked(move |_| {
             if let Some(ui) = w.upgrade() {
                 if let Some(k) = ui.selected_sink_entry() {
@@ -630,7 +624,8 @@ impl Ui {
         let w = weak.clone();
         self.record_btn.connect_clicked(move |_| {
             if let Some(ui) = w.upgrade() {
-                if let Some(c) = &ui.state.borrow().capture {
+                let st = ui.state.borrow();
+                if let Some(c) = st.viewed_capture() {
                     c.start_recording();
                 }
             }
@@ -638,7 +633,8 @@ impl Ui {
         let w = weak.clone();
         self.play_btn.connect_clicked(move |_| {
             if let Some(ui) = w.upgrade() {
-                if let Some(c) = &ui.state.borrow().capture {
+                let st = ui.state.borrow();
+                if let Some(c) = st.viewed_capture() {
                     if c.shared.borrow().record == RecordState::Playing {
                         c.stop_playback();
                     } else {
@@ -688,9 +684,7 @@ impl Ui {
             Event::Disconnected(msg) => {
                 {
                     let mut st = self.state.borrow_mut();
-                    st.capture = None;
-                    st.capture_spec = None;
-                    st.testing = None;
+                    st.captures.clear();
                     st.activity.clear();
                 }
                 self.show_error(&msg);
@@ -973,15 +967,7 @@ impl Ui {
             target.bus.clone(),
             target.output,
         ));
-        {
-            // Release the device before it vanishes.
-            let mut st = self.state.borrow_mut();
-            if !target.output && st.testing.as_deref() == Some(target.name.as_str()) {
-                st.capture = None;
-                st.capture_spec = None;
-                st.testing = None;
-            }
-        }
+        self.state.borrow_mut().captures.remove(&target.name); // release it before it vanishes
         self.apply(entries, target.node_name.clone(), target.description.clone(), true);
     }
 
@@ -1197,36 +1183,7 @@ impl Ui {
             self.state.borrow_mut().selected = pick;
         }
 
-        // The tested input vanished: drop its capture.
-        {
-            let mut st = self.state.borrow_mut();
-            let present = st
-                .testing
-                .as_ref()
-                .is_some_and(|n| st.model.sources.iter().any(|s| &s.name == n));
-            if !present {
-                st.testing = None;
-                st.capture = None;
-                st.capture_spec = None;
-            }
-            if st.testing.is_none() {
-                st.testing = st.selected.clone();
-            }
-        }
-
-        // (Re)start capture when the tested device or its format changed.
-        let testing = {
-            let st = self.state.borrow();
-            let name = st.testing.clone();
-            name.and_then(|n| st.model.sources.iter().find(|s| s.name == n).cloned())
-        };
-        if let Some(t) = testing {
-            let spec = (t.name.clone(), t.rate, t.channels);
-            let restart = self.state.borrow().capture_spec.as_ref() != Some(&spec);
-            if restart {
-                self.start_capture(&t);
-            }
-        }
+        self.sync_captures();
 
         // An output selected: show it instead of the input.
         let sink = {
@@ -1267,12 +1224,9 @@ impl Ui {
         self.sys_row.set_visible(!is_bt && self.state.borrow().model.is_pipewire());
         self.music_btn.set_visible(is_bt && self.music_card(&source).is_some());
 
-        // The meters belong to the tested input; for any other one offer a button.
-        let viewing_other = self.state.borrow().testing.as_deref() != Some(source.name.as_str());
         for w in &self.capture_widgets {
-            w.set_visible(!viewing_other);
+            w.set_visible(true);
         }
-        self.test_btn.set_visible(viewing_other);
 
         self.default_btn.set_visible(!source.is_default);
     }
@@ -1302,10 +1256,12 @@ impl Ui {
         self.unmute_btn.set_visible(k.muted);
         self.volume_btn.set_visible(k.volume_pct != 100);
         self.warn_row.set_visible(k.muted || k.volume_pct != 100);
+        // Meters for an output come from its monitor source (what it is playing).
+        let monitor = format!("{}.monitor", k.name);
+        let has_monitor = self.state.borrow().model.monitors.iter().any(|m| m.name == monitor);
         for w in &self.capture_widgets {
-            w.set_visible(false);
+            w.set_visible(has_monitor);
         }
-        self.test_btn.set_visible(false);
         let is_bt = k.bus.as_deref() == Some("bluetooth");
         self.sys_note.set_text(SYS_NOTE_OUTPUT);
         self.sys_row.set_visible(!is_bt && self.state.borrow().model.is_pipewire());
@@ -1337,11 +1293,31 @@ impl Ui {
         ));
     }
 
-    fn start_capture(&self, source: &SourceEntry) {
-        let backend = self.backend();
+    /// Keep exactly one capture per unmuted input and per output monitor.
+    fn sync_captures(&self) {
+        let Some(backend) = self.backend() else { return };
         let mut st = self.state.borrow_mut();
-        st.capture = None;
-        st.capture_spec = Some((source.name.clone(), source.rate, source.channels));
+        let State { model, captures, .. } = &mut *st;
+        let wanted: Vec<&SourceEntry> =
+            model.sources.iter().filter(|s| !s.muted).chain(&model.monitors).collect();
+        captures.retain(|name, ((rate, ch), cap)| {
+            // Failed captures are dropped so the next refresh retries them.
+            !matches!(cap.shared.borrow().state, CaptureState::Failed(_))
+                && wanted
+                    .iter()
+                    .any(|s| &s.name == name && s.rate == *rate && s.channels == *ch)
+        });
+        for src in wanted {
+            if !captures.contains_key(&src.name) {
+                if let Ok(c) = Capture::start(&backend.ctx, src) {
+                    captures.insert(src.name.clone(), ((src.rate, src.channels), c));
+                }
+            }
+        }
+    }
+
+    /// Point the meters at the device now shown (names, row count, history).
+    fn reset_meters_for(&self, source: &SourceEntry) {
         let names = channel_names(source);
         *self.meter_data.borrow_mut() = MeterData {
             levels: vec![
@@ -1350,21 +1326,8 @@ impl Ui {
             ],
             names,
         };
-        self.meters
-            .set_content_height(METER_ROW_H * source.channels.max(1) as i32);
+        self.meters.set_content_height(METER_ROW_H * source.channels.max(1) as i32);
         self.wave_data.borrow_mut().clear();
-        self.play_btn.set_sensitive(false);
-        self.record_label.set_text("");
-
-        let Some(backend) = backend else { return };
-        match Capture::start(&backend.ctx, source) {
-            Ok(c) => st.capture = Some(c),
-            Err(e) => {
-                drop(st);
-                self.status.set_text(&format!("Capture error: {e}"));
-                set_status_class(&self.status, "error");
-            }
-        }
     }
 
     fn update_source_info(&self, s: &SourceEntry) {
@@ -1443,8 +1406,39 @@ impl Ui {
     fn tick(&self) {
         self.update_row_activity();
         let st = self.state.borrow();
-        // With no capture (failed to start) the last status message stays up.
-        let Some(capture) = &st.capture else { return };
+        let viewed = st.viewed_meter_source();
+        let source = viewed.as_ref().and_then(|n| {
+            st.model.sources.iter().chain(&st.model.monitors).find(|s| &s.name == n)
+        });
+        // Re-point the meters when the shown device changed.
+        if *self.meter_for.borrow() != viewed {
+            *self.meter_for.borrow_mut() = viewed.clone();
+            if let Some(src) = source {
+                self.reset_meters_for(src);
+            }
+            self.play_btn.set_sensitive(false);
+            self.record_label.set_text("");
+        }
+        let Some(capture) = st.viewed_capture() else {
+            // Muted inputs and outputs without a monitor have nothing to meter.
+            self.stats.set_text("");
+            self.wave_data.borrow_mut().clear();
+            for lv in &mut self.meter_data.borrow_mut().levels {
+                *lv = ChannelLevel { peak_db: FLOOR_DB, rms_db: FLOOR_DB, held_peak_db: FLOOR_DB };
+            }
+            self.meters.queue_draw();
+            self.wave.queue_draw();
+            self.record_btn.set_sensitive(false);
+            self.play_btn.set_sensitive(false);
+            let muted = source.is_some_and(|s| s.muted);
+            self.status.set_text(if muted {
+                "Muted — unmute to see the signal."
+            } else {
+                "Not monitored right now."
+            });
+            set_status_class(&self.status, "dim-label");
+            return;
+        };
         let sh = capture.shared.borrow();
 
         let snap = sh.analyzer.snapshot();

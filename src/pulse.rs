@@ -119,6 +119,8 @@ impl CardEntry {
 pub struct Model {
     pub sources: Vec<SourceEntry>,
     pub sinks: Vec<SinkEntry>,
+    /// Monitor sources: what each output is playing (name `<sink>.monitor`).
+    pub monitors: Vec<SourceEntry>,
     pub cards: Vec<CardEntry>,
     pub server_name: String,
 }
@@ -248,8 +250,11 @@ impl Backend {
         introspect.get_source_info_list(move |res| match res {
             ListResult::Item(info) => {
                 // Monitor sources are loopbacks of outputs, not inputs.
+                let entry = source_entry(info);
                 if info.monitor_of_sink.is_none() {
-                    model_s.borrow_mut().sources.push(source_entry(info));
+                    model_s.borrow_mut().sources.push(entry);
+                } else {
+                    model_s.borrow_mut().monitors.push(entry);
                 }
             }
             ListResult::Error => this.finish_refresh(None),

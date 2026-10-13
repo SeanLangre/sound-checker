@@ -15,7 +15,7 @@
 - [x] Per-output system-wide disable (same WirePlumber rule; hidden for Bluetooth)
 - [x] Set as default for inputs and outputs
 - [x] Rename devices (app-only, `names.json`)
-- [x] Selecting a device no longer switches capture; "Test this input" button does
+- [x] Meters, waveform and recording for outputs (monitor sources); every input and output is monitored automatically, selecting only changes the view
 - [x] Confirmation dialogs: system-wide disable, Bluetooth headset/music mode
 - [x] Restart side effects: restore default devices and reconnect Bluetooth after the WirePlumber restart
 
@@ -77,6 +77,7 @@ Open decisions:
 
 ## Later
 
+- [ ] Check that continuous capture on every device doesn't wake suspended hardware or change Bluetooth profiles (`DONT_INHIBIT_AUTO_SUSPEND` is set)
 - [ ] Tune the activity threshold (currently about -45 dBFS) on quiet and noisy mics
 - [ ] Show muted devices as green when they receive input. Unconfirmed whether this is
       possible: the Pulse API only delivers post-mute audio. A test with a loopback source

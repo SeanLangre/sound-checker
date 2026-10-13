@@ -124,7 +124,8 @@ impl Capture {
             .connect_record(
                 Some(&source.name),
                 Some(&attr),
-                FlagSet::ADJUST_LATENCY | FlagSet::DONT_MOVE,
+                // Don't keep sleeping devices awake just for the meters.
+                FlagSet::ADJUST_LATENCY | FlagSet::DONT_MOVE | FlagSet::DONT_INHIBIT_AUTO_SUSPEND,
             )
             .map_err(|e| format!("could not start capture: {e}"))?;
 
