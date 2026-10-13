@@ -8,6 +8,7 @@ use gtk::glib;
 
 use crate::activity::ActivityMonitor;
 use crate::analysis::{ChannelLevel, Status, FLOOR_DB};
+use crate::names::{self, Names};
 use crate::capture::{Capture, CaptureState, RecordState, RECORD_SECS};
 use crate::pulse::{Backend, CardEntry, Event, Model, SinkEntry, SourceEntry};
 use crate::wireplumber::{self, DisabledEntry};
@@ -69,6 +70,7 @@ struct State {
     capture: Option<Capture>,
     backend: Option<Rc<Backend>>,
     activity: ActivityMonitor,
+    names: Names,
     disabled: Vec<DisabledEntry>,
     can_restart: bool,
     pending: Option<Pending>,
@@ -111,6 +113,7 @@ struct Ui {
     record_label: gtk::Label,
     test_btn: gtk::Button,
     mute_btn: gtk::Button,
+    rename_btn: gtk::Button,
     default_btn: gtk::Button,
     music_btn: gtk::Button,
     /// Meters, stats, waveform, status and recording controls.
@@ -236,6 +239,8 @@ impl Ui {
         let music_btn = gtk::Button::with_label("Switch to music mode (no mic)");
         music_btn.set_valign(gtk::Align::Start);
         music_btn.set_visible(false);
+        let rename_btn = gtk::Button::with_label("Rename…");
+        rename_btn.set_valign(gtk::Align::Start);
         let default_btn = gtk::Button::with_label("Set as default");
         default_btn.set_valign(gtk::Align::Start);
         let mute_btn = gtk::Button::with_label("Mute");
@@ -243,6 +248,7 @@ impl Ui {
         let actions = gtk::Box::builder().spacing(8).build();
         actions.append(&mute_btn);
         actions.append(&default_btn);
+        actions.append(&rename_btn);
         actions.append(&sys_row);
         actions.append(&music_btn);
 
@@ -369,6 +375,7 @@ impl Ui {
             record_label,
             test_btn,
             mute_btn,
+            rename_btn,
             default_btn,
             music_btn,
             capture_widgets,
@@ -388,6 +395,7 @@ impl Ui {
                 capture: None,
                 backend: None,
                 activity: ActivityMonitor::default(),
+                names: names::load(),
                 disabled: wireplumber::load(),
                 can_restart: wireplumber::can_restart(),
                 pending: None,
@@ -523,6 +531,12 @@ impl Ui {
             }
         });
         let w = weak.clone();
+        self.rename_btn.connect_clicked(move |_| {
+            if let Some(ui) = w.upgrade() {
+                ui.rename_dialog();
+            }
+        });
+        let w = weak.clone();
         self.default_btn.connect_clicked(move |_| {
             if let Some(ui) = w.upgrade() {
                 if let (Some(b), Some(k)) = (ui.backend(), ui.selected_sink_entry()) {
@@ -628,6 +642,17 @@ impl Ui {
                 {
                     let mut st = self.state.borrow_mut();
                     st.model = model;
+                    let State { model, names, .. } = &mut *st;
+                    for src in &mut model.sources {
+                        if let Some(n) = names.get(&src.node_name) {
+                            src.description = n.clone();
+                        }
+                    }
+                    for sink in &mut model.sinks {
+                        if let Some(n) = names.get(&sink.name) {
+                            sink.description = n.clone();
+                        }
+                    }
                     if let Some(b) = st.backend.clone() {
                         let State { model, activity, .. } = &mut *st;
                         activity.sync(&b.ctx, &model.sources);
@@ -787,6 +812,55 @@ impl Ui {
         // Header funcs ran while rows were being appended, before `rows` was set.
         self.list.invalidate_headers();
         self.rebuilding.set(false);
+    }
+
+    /// Key (stable node name) and displayed name of whatever the pane shows.
+    fn renamable(&self) -> Option<(String, String)> {
+        if let Some(k) = self.selected_sink_entry() {
+            return Some((k.name, k.description));
+        }
+        self.selected_source().map(|s| (s.node_name, s.description))
+    }
+
+    fn rename_dialog(self: &Rc<Self>) {
+        let Some((key, current)) = self.renamable() else { return };
+        let entry = gtk::Entry::builder().text(&current).activates_default(true).build();
+        #[allow(deprecated)]
+        {
+            let dlg = adw::MessageDialog::new(Some(&self.window), Some("Rename device"), Some("The name is only used inside this app."));
+            dlg.set_extra_child(Some(&entry));
+            dlg.add_responses(&[("cancel", "Cancel"), ("reset", "Reset"), ("save", "Save")]);
+            dlg.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+            dlg.set_default_response(Some("save"));
+            dlg.set_close_response("cancel");
+            let weak = Rc::downgrade(self);
+            dlg.connect_response(None, move |_, response| {
+                let Some(ui) = weak.upgrade() else { return };
+                let text = entry.text().trim().to_string();
+                {
+                    let mut st = ui.state.borrow_mut();
+                    match response {
+                        "save" if !text.is_empty() => {
+                            st.names.insert(key.clone(), text);
+                        }
+                        "reset" => {
+                            st.names.remove(&key);
+                        }
+                        _ => return,
+                    }
+                    if let Err(e) = names::save(&st.names) {
+                        drop(st);
+                        ui.toast(&format!("Could not save the name ({e})"));
+                        return;
+                    }
+                }
+                // The refreshed model brings back original names after a reset.
+                if let Some(b) = ui.backend() {
+                    b.schedule_refresh();
+                }
+            });
+            dlg.present();
+        }
     }
 
     fn toast(&self, text: &str) {

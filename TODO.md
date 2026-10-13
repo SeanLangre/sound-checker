@@ -9,9 +9,17 @@
 - [x] Flatpak manifest and desktop file
 - [x] Device list split into Unmuted / Muted
 - [x] Activity colouring: green (fading over 3 s) for active, dimmed for idle, red for muted
+- [x] Output devices: list, mute, volume reset, set as default, Muted category, green while playing
+- [x] Inputs / Outputs headings
+- [x] Mute button on every device
+- [x] Set as default for inputs and outputs
+- [x] Rename devices (app-only, `names.json`)
+- [x] Selecting a device no longer switches capture; "Test this input" button does
+- [x] Confirmation dialogs: system-wide disable, Bluetooth headset/music mode
+- [x] Restart side effects: restore default devices and reconnect Bluetooth after the WirePlumber restart
 
 
-## System-wide mic disable (planned)
+## System-wide mic disable
 
 Goal: disabling a mic hides it from every app using PipeWire (Discord, browsers, OBS),
 not just from this app's list. Uses WirePlumber `node.disabled` rules, applied per input
@@ -49,6 +57,7 @@ Steps:
 - [x] `pulse.rs`: expose `node.name` and `device.name` on `SourceEntry`, `device.name` on `CardEntry`
 - [x] `ui.rs`: Disabled category, button and confirmation dialog, status display
 - [x] README feature row
+- [ ] Bluetooth headsets: "Switch to music mode (no mic)" replaces the node rule (disabling a BT mic node cut playback; cause unconfirmed)
 - [ ] Test cases: hot-plug while disabled, BT headset, disabling the default source
 
 Open decisions:
@@ -56,6 +65,10 @@ Open decisions:
 - [ ] Whole-device disable (all inputs of a card at once): proposed per-node only for now
 
 ## Stretch
+
+- [ ] Rename system-wide (WirePlumber `node.description` rule; needs the same restart)
+- [ ] Test tone / playback test for outputs
+- [ ] Per-output disable
 
 - [ ] Live listen: mic -> output with mute control and a "use headphones" warning
       (module-loopback, or own playback stream if latency control is needed)
@@ -68,6 +81,7 @@ Open decisions:
 - [ ] Show muted devices as green when they receive input. Unconfirmed whether this is
       possible: the Pulse API only delivers post-mute audio. A test with a loopback source
       was inconclusive; may need PipeWire-native monitoring (not the Pulse API)
+- [ ] Output rows: 3 s fade like inputs (same in-place row update as below)
 - [ ] Keep the 3 s fade running across list rebuilds (update rows in place instead of recreating them)
 
 - [ ] Verify against the testing matrix in README.md (hot-plug, BT HFP, 44.1 kHz, real PulseAudio)

@@ -1,6 +1,7 @@
 mod activity;
 mod analysis;
 mod capture;
+mod names;
 mod pulse;
 mod ui;
 mod wireplumber;

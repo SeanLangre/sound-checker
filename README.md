@@ -13,20 +13,22 @@ Open tasks are in [TODO.md](TODO.md).
 
 | Feature                 | Behaviour                                                                 |
 | ----------------------- | ------------------------------------------------------------------------- |
-| Device discovery        | List input sources; hide monitor sources (`monitor_of_sink` is set)       |
-| Categories              | List split into Unmuted / Muted (and "No microphone" for A2DP-only Bluetooth) |
-| Activity colouring      | Unmuted inputs picking up sound turn green and fade out over 3 s; idle ones are dimmed; muted ones are red |
+| Device discovery        | List input sources (monitor sources hidden) and outputs, under "Inputs" and "Outputs" headings |
+| Categories              | Inputs: Unmuted / Muted / "No microphone" (A2DP-only Bluetooth) / Disabled. Outputs: Unmuted / Muted |
+| Activity colouring      | Unmuted inputs picking up sound turn green and fade out over 3 s; idle ones are dimmed; muted ones are red. Outputs: green while playing, dimmed when idle, red when muted |
 | Hot-plug                | Refresh on Pulse subscribe events (source/card add, remove, change)       |
-| Mute & volume           | Show server-side mute and volume; one-click unmute / reset to 100%        |
+| Mute & volume           | Mute button on every input and output (list row and details pane); reset volume to 100% |
+| Default device          | "Set as default" for any input or output (the current one is tagged "default") |
+| Rename                  | "Rename…" gives a device a custom name, shown only in this app (`~/.config/sound-checker/names.json`, keyed by node name); Reset restores the original |
 | Per-channel meters      | Peak and RMS in dBFS for each channel, with peak hold                     |
 | Waveform                | Scrolling waveform of the selected input                                  |
 | Diagnostics             | Silence, clipping, dead/imbalanced channel, disconnect, capture errors    |
 | Noise floor             | Quietest RMS window over the last 10 s                                    |
 | Record & play back      | Record 5 s, play it through the default output                            |
 | Bluetooth profile hint  | Detect a BT card in A2DP with an available HFP/HSP profile; offer to switch |
-| System-wide disable     | PipeWire only: block one input for every app via a WirePlumber `node.disabled` rule (state in `~/.config/sound-checker/disabled.json`); re-enable from the "Disabled" list. Not hardware-level: direct ALSA access still works |
+| System-wide disable     | PipeWire only: block one input for every app via a WirePlumber `node.disabled` rule (state in `~/.config/sound-checker/disabled.json`); re-enable from the "Disabled" list. Restarts WirePlumber (brief audio interruption); the default devices are restored and Bluetooth devices reconnected afterwards. Bluetooth headsets get "Switch to music mode (no mic)" instead. Not hardware-level: direct ALSA access still works |
 | Device details          | Sample rate, format, channel map, driver, card/bus info                   |
-| Switching               | Change input without restarting                                           |
+| Selecting vs testing    | Selecting a device only shows its details; meters, waveform and recording follow the input chosen with "Test this input" |
 
 ## UI sketch
 
