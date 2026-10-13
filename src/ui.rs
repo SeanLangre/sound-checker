@@ -21,19 +21,28 @@ const RED_DB: f32 = -3.0;
 enum RowKind {
     /// Source name and whether it is muted.
     Source(String, bool),
-    /// Output (sink) name.
-    Sink(String),
+    /// Output (sink) name and whether it is muted.
+    Sink(String, bool),
     BluetoothCard,
     /// An input blocked system-wide (from the saved state).
     Disabled,
 }
 
 impl RowKind {
+    /// The top-level heading the row sits under.
+    fn section(&self) -> &'static str {
+        match self {
+            RowKind::Sink(..) => "Outputs",
+            _ => "Inputs",
+        }
+    }
+
     fn category(&self) -> &'static str {
         match self {
             RowKind::Source(_, false) => "Unmuted",
             RowKind::Source(_, true) => "Muted",
-            RowKind::Sink(_) => "Outputs",
+            RowKind::Sink(_, false) => "Unmuted",
+            RowKind::Sink(_, true) => "Muted",
             RowKind::BluetoothCard => "No microphone",
             RowKind::Disabled => "Disabled",
         }
@@ -439,21 +448,39 @@ impl Ui {
         self.list.set_header_func(move |row, before| {
             let Some(ui) = w.upgrade() else { return };
             let st = ui.state.borrow();
-            let cat = |r: &gtk::ListBoxRow| st.rows.get(r.index() as usize).map(RowKind::category);
-            let this = cat(row);
-            if this.is_some() && this != before.and_then(cat) {
-                let head = gtk::Label::builder()
-                    .label(this.unwrap_or_default())
+            let kind = |r: &gtk::ListBoxRow| st.rows.get(r.index() as usize);
+            let key = |r: &gtk::ListBoxRow| kind(r).map(|k| (k.section(), k.category()));
+            let (Some(this), prev) = (key(row), before.and_then(key)) else {
+                row.set_header(gtk::Widget::NONE);
+                return;
+            };
+            if Some(this) == prev {
+                row.set_header(gtk::Widget::NONE);
+                return;
+            }
+            let head = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            if prev.map(|p| p.0) != Some(this.0) {
+                head.append(
+                    &gtk::Label::builder()
+                        .label(this.0)
+                        .xalign(0.0)
+                        .margin_top(if prev.is_some() { 20 } else { 8 })
+                        .margin_start(12)
+                        .css_classes(["title-4"])
+                        .build(),
+                );
+            }
+            head.append(
+                &gtk::Label::builder()
+                    .label(this.1)
                     .xalign(0.0)
                     .margin_top(12)
                     .margin_bottom(4)
                     .margin_start(12)
                     .css_classes(["heading", "dim-label"])
-                    .build();
-                row.set_header(Some(&head));
-            } else {
-                row.set_header(gtk::Widget::NONE);
-            }
+                    .build(),
+            );
+            row.set_header(Some(&head));
         });
 
         let w = weak.clone();
@@ -658,39 +685,6 @@ impl Ui {
                 self.list.append(&row);
                 rows.push(RowKind::Source(s.name.clone(), s.muted));
             }
-            for k in &st.model.sinks {
-                let row = adw::ActionRow::builder()
-                    .title(glib::markup_escape_text(&k.description))
-                    .subtitle(glib::markup_escape_text(&sink_subtitle(k)))
-                    .build();
-                row.add_prefix(&gtk::Image::from_icon_name("audio-speakers-symbolic"));
-                let (icon, tip) = if k.muted {
-                    ("audio-volume-muted-symbolic", "Muted — click to unmute")
-                } else {
-                    ("audio-volume-high-symbolic", "Click to mute")
-                };
-                let mute = gtk::Button::builder()
-                    .icon_name(icon)
-                    .tooltip_text(tip)
-                    .valign(gtk::Align::Center)
-                    .css_classes(["flat", "circular"])
-                    .build();
-                let weak = Rc::downgrade(self);
-                let (name, muted) = (k.name.clone(), k.muted);
-                mute.connect_clicked(move |_| {
-                    if let Some(b) = weak.upgrade().and_then(|ui| ui.backend()) {
-                        b.set_sink_mute(&name, !muted);
-                    }
-                });
-                row.add_suffix(&mute);
-                if k.is_default {
-                    let tag = gtk::Label::new(Some("default"));
-                    tag.add_css_class("dim-label");
-                    row.add_suffix(&tag);
-                }
-                self.list.append(&row);
-                rows.push(RowKind::Sink(k.name.clone()));
-            }
             for c in st.model.bluetooth_without_mic() {
                 let row = adw::ActionRow::builder()
                     .title(glib::markup_escape_text(&c.description))
@@ -744,6 +738,49 @@ impl Ui {
                 row.add_suffix(&btn);
                 self.list.append(&row);
                 rows.push(RowKind::Disabled);
+            }
+            let mut sinks: Vec<_> = st.model.sinks.iter().collect();
+            sinks.sort_by_key(|k| k.muted);
+            for k in sinks {
+                let row = adw::ActionRow::builder()
+                    .title(glib::markup_escape_text(&k.description))
+                    .subtitle(glib::markup_escape_text(&sink_subtitle(k)))
+                    .build();
+                row.add_prefix(&gtk::Image::from_icon_name("audio-speakers-symbolic"));
+                // Red when muted, green while something is playing, dimmed when idle.
+                row.add_css_class(if k.muted {
+                    "src-muted"
+                } else if k.state == "Running" {
+                    "src-active"
+                } else {
+                    "src-idle"
+                });
+                let (icon, tip) = if k.muted {
+                    ("audio-volume-muted-symbolic", "Muted — click to unmute")
+                } else {
+                    ("audio-volume-high-symbolic", "Click to mute")
+                };
+                let mute = gtk::Button::builder()
+                    .icon_name(icon)
+                    .tooltip_text(tip)
+                    .valign(gtk::Align::Center)
+                    .css_classes(["flat", "circular"])
+                    .build();
+                let weak = Rc::downgrade(self);
+                let (name, muted) = (k.name.clone(), k.muted);
+                mute.connect_clicked(move |_| {
+                    if let Some(b) = weak.upgrade().and_then(|ui| ui.backend()) {
+                        b.set_sink_mute(&name, !muted);
+                    }
+                });
+                row.add_suffix(&mute);
+                if k.is_default {
+                    let tag = gtk::Label::new(Some("default"));
+                    tag.add_css_class("dim-label");
+                    row.add_suffix(&tag);
+                }
+                self.list.append(&row);
+                rows.push(RowKind::Sink(k.name.clone(), k.muted));
             }
         }
         self.state.borrow_mut().rows = rows;
@@ -984,7 +1021,7 @@ impl Ui {
                 st.selected = Some(name);
                 st.selected_sink = None;
             }
-            Some(RowKind::Sink(name)) => self.state.borrow_mut().selected_sink = Some(name),
+            Some(RowKind::Sink(name, _)) => self.state.borrow_mut().selected_sink = Some(name),
             _ => return,
         }
         self.sync_selection();
@@ -1064,7 +1101,7 @@ impl Ui {
         if let Some(sink) = sink {
             self.placeholder.set_visible(false);
             self.analysis.set_visible(true);
-            self.select_row(|r| matches!(r, RowKind::Sink(n) if *n == sink.name));
+            self.select_row(|r| matches!(r, RowKind::Sink(n, _) if *n == sink.name));
             self.show_sink(&sink);
             return;
         }
