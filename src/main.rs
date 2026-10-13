@@ -1,3 +1,4 @@
+mod activity;
 mod analysis;
 mod capture;
 mod pulse;

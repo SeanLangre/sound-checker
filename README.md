@@ -7,11 +7,15 @@ what the mic actually captures.
 Targets: Arch Linux and Fedora, desktop-environment agnostic, PipeWire or PulseAudio.
 Open tasks are in [TODO.md](TODO.md).
 
+![Linux Sound Checker showing the device list and live analysis](docs/screenshot.png)
+
 ## Features
 
 | Feature                 | Behaviour                                                                 |
 | ----------------------- | ------------------------------------------------------------------------- |
 | Device discovery        | List input sources; hide monitor sources (`monitor_of_sink` is set)       |
+| Categories              | List split into Unmuted / Muted (and "No microphone" for A2DP-only Bluetooth) |
+| Activity colouring      | Unmuted inputs picking up sound turn green and fade out over 3 s; idle ones are dimmed; muted ones are red |
 | Hot-plug                | Refresh on Pulse subscribe events (source/card add, remove, change)       |
 | Mute & volume           | Show server-side mute and volume; one-click unmute / reset to 100%        |
 | Per-channel meters      | Peak and RMS in dBFS for each channel, with peak hold                     |
@@ -61,6 +65,8 @@ GTK main loop (UI thread)
 │                   mute/volume, subscribe events -> device model
 ├── src/capture.rs  Pulse record stream for the selected source -> analyzer;
 │                   fixed-length recording and playback stream
+├── src/activity.rs one tiny peak-detect stream per unmuted source, used for the
+│                   green/grey row colouring (like pavucontrol's level bars)
 ├── src/analysis.rs per-block peak/RMS, clip/silence/dead-channel detection,
 │                   waveform decimation (pure, unit-tested)
 └── src/ui.rs       device list, meters, waveform; redraws from a
@@ -71,6 +77,15 @@ Analysis runs per audio block, outside the drawing path. The UI only reads the
 latest summary and a decimated waveform; it never redraws per sample. Pulse
 callbacks and the UI share one thread, so state is `Rc<RefCell<..>>` with no
 locking (no ring buffer needed).
+
+## Notes and limitations
+
+- Activity colouring opens a capture stream on every unmuted input, which wakes
+  suspended devices (a webcam LED may light up while the app is open).
+- Muted inputs are not monitored: the audio server silences them before any
+  client can see the signal, so they always show red.
+- Row colours are CSS classes (`src-active`, `src-idle`, `src-muted`); the fade is
+  a CSS transition, so a list rebuild (any device event) restarts it.
 
 ## Build
 

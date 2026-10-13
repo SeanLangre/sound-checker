@@ -6,6 +6,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 
+use crate::activity::ActivityMonitor;
 use crate::analysis::{ChannelLevel, Status, FLOOR_DB};
 use crate::capture::{Capture, CaptureState, RecordState, RECORD_SECS};
 use crate::pulse::{Backend, CardEntry, Event, Model, SourceEntry};
@@ -46,6 +47,7 @@ struct State {
     capture_spec: Option<(String, u32, u8)>,
     capture: Option<Capture>,
     backend: Option<Rc<Backend>>,
+    activity: ActivityMonitor,
 }
 
 struct Ui {
@@ -77,7 +79,33 @@ struct Ui {
     state: RefCell<State>,
 }
 
+const CSS: &str = "
+row.src-active {
+  background-color: alpha(@success_bg_color, 0.45);
+  transition: background-color 100ms ease-out, opacity 100ms ease-out;
+}
+row.src-idle {
+  opacity: 0.5;
+  transition: background-color 3s ease-out, opacity 3s ease-out;
+}
+row.src-muted { background-color: alpha(@error_bg_color, 0.4); }
+";
+
+#[allow(deprecated)] // the display-wide provider call is the only way to style list rows
+fn load_css() {
+    let provider = gtk::CssProvider::new();
+    provider.load_from_data(CSS);
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
+
 pub fn build(app: &adw::Application) {
+    load_css();
     let ui = Ui::new(app);
     ui.connect();
     ui.window.present();
@@ -255,6 +283,7 @@ impl Ui {
                 capture_spec: None,
                 capture: None,
                 backend: None,
+                activity: ActivityMonitor::default(),
             }),
         });
 
@@ -274,6 +303,7 @@ impl Ui {
             st.capture = None;
             st.capture_spec = None;
             st.backend = None;
+            st.activity.clear();
         }
         let weak = Rc::downgrade(self);
         let backend = Backend::new(move |ev| {
@@ -408,11 +438,19 @@ impl Ui {
                     let mut st = self.state.borrow_mut();
                     st.capture = None;
                     st.capture_spec = None;
+                    st.activity.clear();
                 }
                 self.show_error(&msg);
             }
             Event::Update(model) => {
-                self.state.borrow_mut().model = model;
+                {
+                    let mut st = self.state.borrow_mut();
+                    st.model = model;
+                    if let Some(b) = st.backend.clone() {
+                        let State { model, activity, .. } = &mut *st;
+                        activity.sync(&b.ctx, &model.sources);
+                    }
+                }
                 self.rebuild_list();
                 self.sync_selection();
             }
@@ -474,6 +512,8 @@ impl Ui {
             }
         }
         self.state.borrow_mut().rows = rows;
+        // Header funcs ran while rows were being appended, before `rows` was set.
+        self.list.invalidate_headers();
         self.rebuilding.set(false);
     }
 
@@ -639,8 +679,34 @@ impl Ui {
         self.details.set_text(&details);
     }
 
+    /// Red for muted inputs, green for ones picking up sound (fading out over
+    /// 3 s via the CSS transition on `src-idle`), dimmed otherwise.
+    fn update_row_activity(&self) {
+        const CLASSES: [&str; 3] = ["src-active", "src-idle", "src-muted"];
+        let st = self.state.borrow();
+        for (i, kind) in st.rows.iter().enumerate() {
+            let Some(row) = self.list.row_at_index(i as i32) else { continue };
+            let RowKind::Source(name, muted) = kind else { continue };
+            let want = if *muted {
+                "src-muted"
+            } else if st.activity.is_active(name) {
+                "src-active"
+            } else {
+                "src-idle"
+            };
+            if row.has_css_class(want) {
+                continue;
+            }
+            for c in CLASSES.into_iter().filter(|c| *c != want) {
+                row.remove_css_class(c);
+            }
+            row.add_css_class(want);
+        }
+    }
+
     /// Per-frame: pull the latest analysis and redraw.
     fn tick(&self) {
+        self.update_row_activity();
         let st = self.state.borrow();
         // With no capture (failed to start) the last status message stays up.
         let Some(capture) = &st.capture else { return };
