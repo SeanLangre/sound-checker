@@ -200,16 +200,13 @@ struct Ui {
 const CSS: &str = "
 row.src-active {
   background-color: alpha(mix(@success_bg_color, #808080, 0.55), 0.35);
-  transition: background-color 100ms ease-out, opacity 100ms ease-out;
+  transition: none;
 }
 row.src-idle {
   opacity: 0.5;
-  transition: background-color 100ms ease-out, opacity 100ms ease-out;
+  transition: none;
 }
-row.src-idle.src-fade {
-  transition: background-color 3s ease-out, opacity 3s ease-out;
-}
-row.src-muted { background-color: alpha(mix(@error_bg_color, #808080, 0.55), 0.3); }
+row.src-muted { background-color: alpha(mix(@error_bg_color, #808080, 0.55), 0.3); transition: none; }
 row.src-active:hover { background-color: alpha(mix(@success_bg_color, #808080, 0.3), 0.5); }
 row.src-muted:hover { background-color: alpha(mix(@error_bg_color, #808080, 0.3), 0.45); }
 row.src-active:selected { background-color: alpha(@success_bg_color, 0.75); transition: none; }
@@ -1428,8 +1425,7 @@ impl Ui {
         self.details.set_text(&details);
     }
 
-    /// Red for muted inputs, green for ones picking up sound (fading out over
-    /// 3 s via the CSS transition on `src-idle`), dimmed otherwise.
+    /// Red for muted inputs, green for ones picking up sound, dimmed otherwise.
     fn update_row_activity(&self) {
         const CLASSES: [&str; 3] = ["src-active", "src-idle", "src-muted"];
         let st = self.state.borrow();
@@ -1445,12 +1441,6 @@ impl Ui {
             };
             if row.has_css_class(want) {
                 continue;
-            }
-            // Only a row that was just active fades out slowly.
-            let fade = want == "src-idle" && row.has_css_class("src-active");
-            row.remove_css_class("src-fade");
-            if fade {
-                row.add_css_class("src-fade");
             }
             for c in CLASSES.into_iter().filter(|c| *c != want) {
                 row.remove_css_class(c);

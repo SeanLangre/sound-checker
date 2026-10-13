@@ -8,7 +8,7 @@
 - [x] Bluetooth A2DP -> headset profile hint and switch
 - [x] Flatpak manifest and desktop file
 - [x] Device list split into Unmuted / Muted
-- [x] Activity colouring: green (fading over 3 s) for active, dimmed for idle, red for muted
+- [x] Activity colouring: green for active, dimmed for idle, red for muted
 - [x] Output devices: list, mute, volume reset, set as default, Muted category, green while playing
 - [x] Recording (inputs) and Sound (outputs) tabs replace the Inputs / Outputs headings
 - [x] Mute button on every device
@@ -89,8 +89,6 @@ Open decisions:
 - [ ] Show muted devices as green when they receive input. Unconfirmed whether this is
       possible: the Pulse API only delivers post-mute audio. A test with a loopback source
       was inconclusive; may need PipeWire-native monitoring (not the Pulse API)
-- [ ] Output rows: 3 s fade like inputs (same in-place row update as below)
-- [ ] Keep the 3 s fade running across list rebuilds (update rows in place instead of recreating them)
 
 - [ ] Tabs: check the header switcher in a narrow window (only the wide layout was considered; may need an adw::ViewSwitcherBar)
 - [ ] Verify against the testing matrix in README.md (hot-plug, BT HFP, 44.1 kHz, real PulseAudio)

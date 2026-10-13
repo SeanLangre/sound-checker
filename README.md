@@ -16,7 +16,7 @@ Open tasks are in [TODO.md](TODO.md).
 | Tabs                    | "Recording" tab lists inputs, "Sound" tab lists outputs; the right pane follows the open tab |
 | Device discovery        | List input sources (monitor sources hidden) and outputs, one per tab |
 | Categories              | Recording: Unmuted / Muted / "No microphone" (A2DP-only Bluetooth) / Disabled. Sound: Unmuted / Muted / Disabled |
-| Activity colouring      | Unmuted inputs picking up sound turn green and fade out over 3 s; idle ones are dimmed; muted ones are red. Outputs: green while playing, dimmed when idle, red when muted |
+| Activity colouring      | Unmuted inputs picking up sound turn green (no fade); idle ones are dimmed; muted ones are red. Outputs: green while playing, dimmed when idle, red when muted |
 | Hot-plug                | Refresh on Pulse subscribe events (source/card add, remove, change)       |
 | Mute & volume           | Mute button on every input and output (list row and details pane); reset volume to 100% |
 | Default device          | "Set as default" for any input or output (the current one is tagged "default") |
@@ -74,8 +74,8 @@ locking (no ring buffer needed).
   suspended devices (a webcam LED may light up while the app is open).
 - Muted inputs are not monitored: the audio server silences them before any
   client can see the signal, so they always show red.
-- Row colours are CSS classes (`src-active`, `src-idle`, `src-muted`); the fade is
-  a CSS transition, so a list rebuild (any device event) restarts it.
+- Row colours are CSS classes (`src-active`, `src-idle`, `src-muted`); colour changes
+  are instant, with no CSS transitions.
 
 ## Build
 
