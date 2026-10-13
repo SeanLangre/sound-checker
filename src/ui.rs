@@ -226,7 +226,7 @@ impl Ui {
         rec_row.append(&record_label);
 
         let disable_btn = gtk::Button::with_label("Disable system-wide…");
-        disable_btn.set_valign(gtk::Align::Center);
+        disable_btn.set_valign(gtk::Align::Start);
         let sys_note = label(
             "Hides this input from every app using PipeWire. Direct ALSA access (arecord -D hw:N) still works.",
         );
@@ -682,7 +682,6 @@ impl Ui {
                     .title(glib::markup_escape_text(&s.description))
                     .subtitle(glib::markup_escape_text(&source_subtitle(s)))
                     .build();
-                row.add_prefix(&gtk::Image::from_icon_name("audio-input-microphone-symbolic"));
                 let (icon, tip) = if s.muted {
                     ("microphone-sensitivity-muted-symbolic", "Muted — click to unmute")
                 } else {
@@ -771,7 +770,6 @@ impl Ui {
                     .title(glib::markup_escape_text(&k.description))
                     .subtitle(glib::markup_escape_text(&sink_subtitle(k)))
                     .build();
-                row.add_prefix(&gtk::Image::from_icon_name("audio-speakers-symbolic"));
                 // Red when muted, green while something is playing, dimmed when idle.
                 row.add_css_class(if k.muted {
                     "src-muted"
