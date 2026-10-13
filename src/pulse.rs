@@ -45,6 +45,9 @@ pub struct SourceEntry {
 #[derive(Debug, Clone)]
 pub struct SinkEntry {
     pub name: String,
+    /// PipeWire `node.name` (what WirePlumber rules match on).
+    pub node_name: String,
+    pub device_name: Option<String>,
     pub description: String,
     pub muted: bool,
     pub volume_pct: u32,
@@ -404,6 +407,8 @@ fn sink_entry(info: &SinkInfo) -> SinkEntry {
     let prop = |k: &str| info.proplist.get_str(k);
     let name = info.name.as_deref().unwrap_or_default().to_string();
     SinkEntry {
+        node_name: prop("node.name").unwrap_or_else(|| name.clone()),
+        device_name: prop("device.name"),
         description: info
             .description
             .as_deref()

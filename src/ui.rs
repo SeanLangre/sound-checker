@@ -25,15 +25,15 @@ enum RowKind {
     /// Output (sink) name and whether it is muted.
     Sink(String, bool),
     BluetoothCard,
-    /// An input blocked system-wide (from the saved state).
-    Disabled,
+    /// A device blocked system-wide (from the saved state); true for outputs.
+    Disabled(bool),
 }
 
 impl RowKind {
     /// The top-level heading the row sits under.
     fn section(&self) -> &'static str {
         match self {
-            RowKind::Sink(..) => "Outputs",
+            RowKind::Sink(..) | RowKind::Disabled(true) => "Outputs",
             _ => "Inputs",
         }
     }
@@ -45,7 +45,7 @@ impl RowKind {
             RowKind::Sink(_, false) => "Unmuted",
             RowKind::Sink(_, true) => "Muted",
             RowKind::BluetoothCard => "No microphone",
-            RowKind::Disabled => "Disabled",
+            RowKind::Disabled(_) => "Disabled",
         }
     }
 }
@@ -77,6 +77,52 @@ struct State {
     pending_token: u32,
 }
 
+/// An input or output that can be blocked system-wide.
+#[derive(Clone)]
+struct Target {
+    name: String,
+    node_name: String,
+    device_name: Option<String>,
+    description: String,
+    bus: Option<String>,
+    is_default: bool,
+    output: bool,
+}
+
+impl Target {
+    fn kind(&self) -> &'static str {
+        if self.output { "output" } else { "input" }
+    }
+}
+
+impl From<&SourceEntry> for Target {
+    fn from(s: &SourceEntry) -> Self {
+        Target {
+            name: s.name.clone(),
+            node_name: s.node_name.clone(),
+            device_name: s.device_name.clone(),
+            description: s.description.clone(),
+            bus: s.bus.clone(),
+            is_default: s.is_default,
+            output: false,
+        }
+    }
+}
+
+impl From<&SinkEntry> for Target {
+    fn from(k: &SinkEntry) -> Self {
+        Target {
+            name: k.name.clone(),
+            node_name: k.node_name.clone(),
+            device_name: k.device_name.clone(),
+            description: k.description.clone(),
+            bus: k.bus.clone(),
+            is_default: k.is_default,
+            output: true,
+        }
+    }
+}
+
 /// A WirePlumber change waiting for the source list to reflect it.
 struct Pending {
     node_name: String,
@@ -86,6 +132,10 @@ struct Pending {
 }
 
 /// How long to wait for the source list after restarting WirePlumber.
+const SYS_NOTE_INPUT: &str =
+    "Hides this input from every app using PipeWire. Direct ALSA access (arecord -D hw:N) still works.";
+const SYS_NOTE_OUTPUT: &str = "Hides this output from every app using PipeWire. Direct ALSA access still works.";
+
 const APPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 struct Ui {
@@ -119,6 +169,7 @@ struct Ui {
     /// Meters, stats, waveform, status and recording controls.
     capture_widgets: Vec<gtk::Widget>,
     sys_row: gtk::Box,
+    sys_note: gtk::Label,
     disable_btn: gtk::Button,
     banner: adw::Banner,
     toasts: adw::ToastOverlay,
@@ -383,6 +434,7 @@ impl Ui {
             music_btn,
             capture_widgets,
             sys_row,
+            sys_note,
             disable_btn,
             banner,
             toasts,
@@ -568,8 +620,10 @@ impl Ui {
         let w = weak.clone();
         self.disable_btn.connect_clicked(move |_| {
             if let Some(ui) = w.upgrade() {
-                if let Some(s) = ui.selected_source() {
-                    ui.confirm_disable(&s);
+                if let Some(k) = ui.selected_sink_entry() {
+                    ui.confirm_disable(&Target::from(&k));
+                } else if let Some(s) = ui.selected_source() {
+                    ui.confirm_disable(&Target::from(&s));
                 }
             }
         });
@@ -734,37 +788,8 @@ impl Ui {
                 self.list.append(&row);
                 rows.push(RowKind::BluetoothCard);
             }
-            for e in &st.disabled {
-                let present = st.model.sources.iter().any(|s| s.node_name == e.node_name);
-                let card_present = st.model.cards.iter().any(|c| {
-                    e.device_name.as_deref().is_some_and(|d| {
-                        c.device_name.as_deref() == Some(d) || c.name == d
-                    })
-                });
-                let status = if present {
-                    "Rule saved — input still visible"
-                } else if card_present {
-                    "Connected — blocked"
-                } else {
-                    "Not connected"
-                };
-                let row = adw::ActionRow::builder()
-                    .title(glib::markup_escape_text(&e.description))
-                    .subtitle(status)
-                    .activatable(false)
-                    .build();
-                row.add_prefix(&gtk::Image::from_icon_name("microphone-disabled-symbolic"));
-                let btn = gtk::Button::builder().label("Enable").valign(gtk::Align::Center).build();
-                let weak = Rc::downgrade(self);
-                let node = e.node_name.clone();
-                btn.connect_clicked(move |_| {
-                    if let Some(ui) = weak.upgrade() {
-                        ui.enable_input(&node);
-                    }
-                });
-                row.add_suffix(&btn);
-                self.list.append(&row);
-                rows.push(RowKind::Disabled);
+            for e in st.disabled.iter().filter(|e| !e.output) {
+                rows.push(self.append_disabled_row(&st, e));
             }
             let mut sinks: Vec<_> = st.model.sinks.iter().collect();
             sinks.sort_by_key(|k| k.muted);
@@ -807,6 +832,9 @@ impl Ui {
                 }
                 self.list.append(&row);
                 rows.push(RowKind::Sink(k.name.clone(), k.muted));
+            }
+            for e in st.disabled.iter().filter(|e| e.output) {
+                rows.push(self.append_disabled_row(&st, e));
             }
         }
         self.state.borrow_mut().rows = rows;
@@ -864,19 +892,57 @@ impl Ui {
         }
     }
 
+    fn append_disabled_row(self: &Rc<Self>, st: &State, e: &DisabledEntry) -> RowKind {
+        let present = st.model.sources.iter().any(|s| s.node_name == e.node_name)
+            || st.model.sinks.iter().any(|k| k.node_name == e.node_name);
+        let card_present = st.model.cards.iter().any(|c| {
+            e.device_name
+                .as_deref()
+                .is_some_and(|d| c.device_name.as_deref() == Some(d) || c.name == d)
+        });
+        let status = if present {
+            "Rule saved — still visible"
+        } else if card_present {
+            "Connected — blocked"
+        } else {
+            "Not connected"
+        };
+        let row = adw::ActionRow::builder()
+            .title(glib::markup_escape_text(&e.description))
+            .subtitle(status)
+            .activatable(false)
+            .build();
+        let icon = if e.output { "audio-speakers-symbolic" } else { "microphone-disabled-symbolic" };
+        row.add_prefix(&gtk::Image::from_icon_name(icon));
+        let btn = gtk::Button::builder().label("Enable").valign(gtk::Align::Center).build();
+        let weak = Rc::downgrade(self);
+        let node = e.node_name.clone();
+        btn.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.enable_input(&node);
+            }
+        });
+        row.add_suffix(&btn);
+        self.list.append(&row);
+        RowKind::Disabled(e.output)
+    }
+
     fn toast(&self, text: &str) {
         self.toasts.add_toast(adw::Toast::new(text));
     }
 
-    fn confirm_disable(self: &Rc<Self>, source: &SourceEntry) {
+    fn confirm_disable(self: &Rc<Self>, target: &Target) {
         let mut body = format!(
-            "“{}” will disappear from every app (Discord, browsers, OBS) until you enable it again. \
+            "“{}” will disappear from every app until you enable it again. \
              All audio is interrupted while WirePlumber restarts, and Bluetooth headphones will disconnect \
              briefly; the app reconnects them afterwards.",
-            source.description
+            target.description
         );
-        if source.is_default {
-            body.push_str("\n\nThis is the default input; apps will fall back to another one.");
+        if target.is_default {
+            body.push_str(&format!(
+                "\n\nThis is the default {}; apps will fall back to another one.",
+                target.kind()
+            ));
         }
         #[allow(deprecated)]
         let dlg = adw::MessageDialog::new(Some(&self.window), Some("Disable system-wide?"), Some(&body));
@@ -887,35 +953,36 @@ impl Ui {
             dlg.set_default_response(Some("cancel"));
             dlg.set_close_response("cancel");
             let weak = Rc::downgrade(self);
-            let source = source.clone();
+            let target = target.clone();
             dlg.connect_response(None, move |_, response| {
                 if let (Some(ui), "disable") = (weak.upgrade(), response) {
-                    ui.disable_input(&source);
+                    ui.disable_target(&target);
                 }
             });
         }
         dlg.present();
     }
 
-    fn disable_input(self: &Rc<Self>, source: &SourceEntry) {
+    fn disable_target(self: &Rc<Self>, target: &Target) {
         let mut entries = self.state.borrow().disabled.clone();
-        entries.retain(|e| e.node_name != source.node_name);
+        entries.retain(|e| e.node_name != target.node_name);
         entries.push(DisabledEntry::new(
-            source.node_name.clone(),
-            source.device_name.clone(),
-            source.description.clone(),
-            source.bus.clone(),
+            target.node_name.clone(),
+            target.device_name.clone(),
+            target.description.clone(),
+            target.bus.clone(),
+            target.output,
         ));
         {
             // Release the device before it vanishes.
             let mut st = self.state.borrow_mut();
-            if st.testing.as_deref() == Some(source.name.as_str()) {
+            if !target.output && st.testing.as_deref() == Some(target.name.as_str()) {
                 st.capture = None;
                 st.capture_spec = None;
                 st.testing = None;
             }
         }
-        self.apply(entries, source.node_name.clone(), source.description.clone(), true);
+        self.apply(entries, target.node_name.clone(), target.description.clone(), true);
     }
 
     fn enable_input(self: &Rc<Self>, node_name: &str) {
@@ -977,7 +1044,8 @@ impl Ui {
         let done = {
             let st = self.state.borrow();
             st.pending.as_ref().filter(|p| {
-                let present = st.model.sources.iter().any(|s| s.node_name == p.node_name);
+                let present = st.model.sources.iter().any(|s| s.node_name == p.node_name)
+                    || st.model.sinks.iter().any(|k| k.node_name == p.node_name);
                 present != p.want_disabled
             }).map(|p| p.token)
         };
@@ -1195,6 +1263,7 @@ impl Ui {
         // A Bluetooth mic can't be blocked per node without breaking playback
         // (mic and speaker share one link); drop the mic via the profile instead.
         let is_bt = source.bus.as_deref() == Some("bluetooth");
+        self.sys_note.set_text(SYS_NOTE_INPUT);
         self.sys_row.set_visible(!is_bt && self.state.borrow().model.is_pipewire());
         self.music_btn.set_visible(is_bt && self.music_card(&source).is_some());
 
@@ -1237,7 +1306,9 @@ impl Ui {
             w.set_visible(false);
         }
         self.test_btn.set_visible(false);
-        self.sys_row.set_visible(false);
+        let is_bt = k.bus.as_deref() == Some("bluetooth");
+        self.sys_note.set_text(SYS_NOTE_OUTPUT);
+        self.sys_row.set_visible(!is_bt && self.state.borrow().model.is_pipewire());
         self.music_btn.set_visible(false);
         self.default_btn.set_visible(!k.is_default);
 

@@ -12,6 +12,7 @@
 - [x] Output devices: list, mute, volume reset, set as default, Muted category, green while playing
 - [x] Inputs / Outputs headings
 - [x] Mute button on every device
+- [x] Per-output system-wide disable (same WirePlumber rule; hidden for Bluetooth)
 - [x] Set as default for inputs and outputs
 - [x] Rename devices (app-only, `names.json`)
 - [x] Selecting a device no longer switches capture; "Test this input" button does
@@ -68,7 +69,6 @@ Open decisions:
 
 - [ ] Rename system-wide (WirePlumber `node.description` rule; needs the same restart)
 - [ ] Test tone / playback test for outputs
-- [ ] Per-output disable
 
 - [ ] Live listen: mic -> output with mute control and a "use headphones" warning
       (module-loopback, or own playback stream if latency control is needed)

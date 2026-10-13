@@ -26,7 +26,7 @@ Open tasks are in [TODO.md](TODO.md).
 | Noise floor             | Quietest RMS window over the last 10 s                                    |
 | Record & play back      | Record 5 s, play it through the default output                            |
 | Bluetooth profile hint  | Detect a BT card in A2DP with an available HFP/HSP profile; offer to switch |
-| System-wide disable     | PipeWire only: block one input for every app via a WirePlumber `node.disabled` rule (state in `~/.config/sound-checker/disabled.json`); re-enable from the "Disabled" list. Restarts WirePlumber (brief audio interruption); the default devices are restored and Bluetooth devices reconnected afterwards. Bluetooth headsets get "Switch to music mode (no mic)" instead. Not hardware-level: direct ALSA access still works |
+| System-wide disable     | PipeWire only: block one input or output for every app via a WirePlumber `node.disabled` rule (state in `~/.config/sound-checker/disabled.json`); re-enable from the "Disabled" list (under Inputs or Outputs). Restarts WirePlumber (brief audio interruption); the default devices are restored and Bluetooth devices reconnected afterwards. Bluetooth headsets get "Switch to music mode (no mic)" instead, and Bluetooth devices have no disable button. Not hardware-level: direct ALSA access still works |
 | Device details          | Sample rate, format, channel map, driver, card/bus info                   |
 | Selecting vs testing    | Selecting a device only shows its details; meters, waveform and recording follow the input chosen with "Test this input" |
 

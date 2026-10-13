@@ -20,6 +20,9 @@ pub struct DisabledEntry {
     pub description: String,
     pub bus: Option<String>,
     pub disabled_at: u64,
+    /// A playback device rather than an input; absent in older state files.
+    #[serde(default)]
+    pub output: bool,
 }
 
 impl DisabledEntry {
@@ -28,11 +31,12 @@ impl DisabledEntry {
         device_name: Option<String>,
         description: String,
         bus: Option<String>,
+        output: bool,
     ) -> Self {
         let disabled_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        DisabledEntry { node_name, device_name, description, bus, disabled_at }
+        DisabledEntry { node_name, device_name, description, bus, disabled_at, output }
     }
 
     fn is_bluetooth(&self) -> bool {
@@ -230,6 +234,7 @@ mod tests {
             description: "x".into(),
             bus: bus.map(str::to_string),
             disabled_at: 0,
+            output: false,
         }
     }
 
@@ -262,6 +267,13 @@ mod tests {
     fn escapes_quotes_and_backslashes() {
         let conf = generate_config(&[entry(r#"a"b\c"#, None)]).unwrap();
         assert!(conf.contains(r#"node.name = "a\"b\\c""#));
+    }
+
+    #[test]
+    fn old_state_without_output_field_loads_as_input() {
+        let json = br#"[{"node_name":"n","device_name":null,"description":"d","bus":null,"disabled_at":1}]"#;
+        let e: Vec<DisabledEntry> = serde_json::from_slice(json).unwrap();
+        assert!(!e[0].output);
     }
 
     #[test]
