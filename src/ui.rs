@@ -17,8 +17,19 @@ const RED_DB: f32 = -3.0;
 
 #[derive(Clone)]
 enum RowKind {
-    Source(String),
+    /// Source name and whether it is muted.
+    Source(String, bool),
     BluetoothCard,
+}
+
+impl RowKind {
+    fn category(&self) -> &'static str {
+        match self {
+            RowKind::Source(_, false) => "Unmuted",
+            RowKind::Source(_, true) => "Muted",
+            RowKind::BluetoothCard => "No microphone",
+        }
+    }
 }
 
 #[derive(Default)]
@@ -293,6 +304,28 @@ impl Ui {
         }
 
         let weak = Rc::downgrade(self);
+        // Category headings: a header appears wherever the category changes.
+        let w = weak.clone();
+        self.list.set_header_func(move |row, before| {
+            let Some(ui) = w.upgrade() else { return };
+            let st = ui.state.borrow();
+            let cat = |r: &gtk::ListBoxRow| st.rows.get(r.index() as usize).map(RowKind::category);
+            let this = cat(row);
+            if this.is_some() && this != before.and_then(cat) {
+                let head = gtk::Label::builder()
+                    .label(this.unwrap_or_default())
+                    .xalign(0.0)
+                    .margin_top(12)
+                    .margin_bottom(4)
+                    .margin_start(12)
+                    .css_classes(["heading", "dim-label"])
+                    .build();
+                row.set_header(Some(&head));
+            } else {
+                row.set_header(gtk::Widget::NONE);
+            }
+        });
+
         let w = weak.clone();
         self.list.connect_row_selected(move |_, row| {
             let (Some(ui), Some(row)) = (w.upgrade(), row) else { return };
@@ -394,7 +427,11 @@ impl Ui {
         let mut rows = Vec::new();
         {
             let st = self.state.borrow();
-            for s in &st.model.sources {
+            // Unmuted first, then muted (stable, so the server order is kept
+            // within each group); the list headers split them into categories.
+            let mut sources: Vec<&SourceEntry> = st.model.sources.iter().collect();
+            sources.sort_by_key(|s| s.muted);
+            for s in sources {
                 let row = adw::ActionRow::builder()
                     .title(glib::markup_escape_text(&s.description))
                     .subtitle(glib::markup_escape_text(&source_subtitle(s)))
@@ -411,7 +448,7 @@ impl Ui {
                     row.add_suffix(&tag);
                 }
                 self.list.append(&row);
-                rows.push(RowKind::Source(s.name.clone()));
+                rows.push(RowKind::Source(s.name.clone(), s.muted));
             }
             for c in st.model.bluetooth_without_mic() {
                 let row = adw::ActionRow::builder()
@@ -459,7 +496,7 @@ impl Ui {
 
     fn on_row_selected(self: &Rc<Self>, index: usize) {
         let kind = self.state.borrow().rows.get(index).cloned();
-        if let Some(RowKind::Source(name)) = kind {
+        if let Some(RowKind::Source(name, _)) = kind {
             self.state.borrow_mut().selected = Some(name);
             self.sync_selection();
         }
@@ -510,7 +547,7 @@ impl Ui {
             .borrow()
             .rows
             .iter()
-            .position(|r| matches!(r, RowKind::Source(n) if *n == source.name));
+            .position(|r| matches!(r, RowKind::Source(n, _) if *n == source.name));
         if let Some(row) = idx.and_then(|i| self.list.row_at_index(i as i32)) {
             self.list.select_row(Some(&row));
         }
@@ -724,7 +761,7 @@ fn db_to_frac(db: f32) -> f64 {
 fn draw_meters(area: &gtk::DrawingArea, cr: &gtk::cairo::Context, w: i32, _h: i32, data: &MeterData) {
     let fg = area.color();
     let label_w = 28.0;
-    let value_w = 70.0;
+    let value_w = 95.0;
     let bar_x = label_w;
     let bar_w = (w as f64 - label_w - value_w).max(10.0);
     cr.select_font_face("monospace", gtk::cairo::FontSlant::Normal, gtk::cairo::FontWeight::Normal);
