@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use gtk::glib;
 use libpulse_binding as pa;
-use libpulse_binding::context::introspect::{CardInfo, ServerInfo, SourceInfo};
+use libpulse_binding::context::introspect::{CardInfo, ServerInfo, SinkInfo, SourceInfo};
 use libpulse_binding::context::subscribe::InterestMaskSet;
 use libpulse_binding::context::{Context, FlagSet, State};
 use libpulse_binding::callbacks::ListResult;
@@ -25,6 +25,26 @@ pub struct SourceEntry {
     /// PipeWire `node.name` (what WirePlumber rules match on).
     pub node_name: String,
     pub device_name: Option<String>,
+    pub description: String,
+    pub muted: bool,
+    pub volume_pct: u32,
+    pub volumes: ChannelVolumes,
+    pub rate: u32,
+    pub channels: u8,
+    pub format: String,
+    pub channel_map: String,
+    pub driver: String,
+    pub card: Option<u32>,
+    pub bus: Option<String>,
+    pub form_factor: Option<String>,
+    pub state: String,
+    pub is_default: bool,
+}
+
+/// An output (playback device).
+#[derive(Debug, Clone)]
+pub struct SinkEntry {
+    pub name: String,
     pub description: String,
     pub muted: bool,
     pub volume_pct: u32,
@@ -63,6 +83,17 @@ impl CardEntry {
         self.bus.as_deref() == Some("bluetooth") || self.name.starts_with("bluez_card")
     }
 
+    /// For a Bluetooth card in a headset profile: the output-only A2DP profile
+    /// that drops its microphone.
+    pub fn music_profile_hint(&self) -> Option<&ProfileEntry> {
+        if !self.is_bluetooth() || self.active_profile.as_deref()?.starts_with("a2dp") {
+            return None;
+        }
+        self.profiles
+            .iter()
+            .find(|p| p.available && p.name.starts_with("a2dp-sink"))
+    }
+
     /// For a Bluetooth card sitting in an A2DP (output-only) profile that also
     /// offers a headset (HFP/HSP) profile: the profile to switch to for a mic.
     pub fn headset_profile_hint(&self) -> Option<&ProfileEntry> {
@@ -84,6 +115,7 @@ impl CardEntry {
 #[derive(Debug, Clone, Default)]
 pub struct Model {
     pub sources: Vec<SourceEntry>,
+    pub sinks: Vec<SinkEntry>,
     pub cards: Vec<CardEntry>,
     pub server_name: String,
 }
@@ -160,7 +192,7 @@ impl Backend {
                     }
                 })));
                 ctx.subscribe(
-                    InterestMaskSet::SOURCE | InterestMaskSet::CARD | InterestMaskSet::SERVER,
+                    InterestMaskSet::SOURCE | InterestMaskSet::SINK | InterestMaskSet::CARD | InterestMaskSet::SERVER,
                     |_ok| {},
                 );
                 drop(ctx);
@@ -219,10 +251,17 @@ impl Backend {
             }
             ListResult::Error => this.finish_refresh(None),
             ListResult::End => {
-                let this2 = Rc::clone(&this);
-                let model_c = Rc::clone(&model_s);
-                let default_c = Rc::clone(&default_s);
-                let introspect = this.ctx.borrow().introspect();
+                let this_k = Rc::clone(&this);
+                let model_k = Rc::clone(&model_s);
+                let default_k = Rc::clone(&default_s);
+                this.ctx.borrow().introspect().get_sink_info_list(move |res| match res {
+                    ListResult::Item(info) => model_k.borrow_mut().sinks.push(sink_entry(info)),
+                    ListResult::Error => this_k.finish_refresh(None),
+                    ListResult::End => {
+                let this2 = Rc::clone(&this_k);
+                let model_c = Rc::clone(&model_k);
+                let default_c = Rc::clone(&default_k);
+                let introspect = this_k.ctx.borrow().introspect();
                 introspect.get_card_info_list(move |res| match res {
                     ListResult::Item(info) => model_c.borrow_mut().cards.push(card_entry(info)),
                     ListResult::Error => this2.finish_refresh(None),
@@ -244,8 +283,15 @@ impl Backend {
                                     s.is_default =
                                         default_d.borrow().as_deref() == Some(s.name.as_str());
                                 }
+                                let default_sink =
+                                    info.default_sink_name.as_ref().map(|s| s.to_string());
+                                for s in &mut m.sinks {
+                                    s.is_default = default_sink.as_deref() == Some(s.name.as_str());
+                                }
                                 this3.finish_refresh(Some(m));
                             });
+                    }
+                });
                     }
                 });
             }
@@ -282,6 +328,39 @@ impl Backend {
         );
     }
 
+    pub fn set_sink_mute(self: &Rc<Self>, sink: &str, mute: bool) {
+        let this = Rc::clone(self);
+        self.ctx
+            .borrow()
+            .introspect()
+            .set_sink_mute_by_name(sink, mute, Some(Box::new(move |_ok| this.schedule_refresh())));
+    }
+
+    pub fn reset_sink_volume(self: &Rc<Self>, sink: &SinkEntry) {
+        let mut vols = sink.volumes;
+        vols.set(sink.channels, Volume::NORMAL);
+        let this = Rc::clone(self);
+        self.ctx.borrow().introspect().set_sink_volume_by_name(
+            &sink.name,
+            &vols,
+            Some(Box::new(move |_ok| this.schedule_refresh())),
+        );
+    }
+
+    pub fn set_default_source(self: &Rc<Self>, name: &str) {
+        let this = Rc::clone(self);
+        self.ctx
+            .borrow_mut()
+            .set_default_source(name, move |_ok| this.schedule_refresh());
+    }
+
+    pub fn set_default_sink(self: &Rc<Self>, name: &str) {
+        let this = Rc::clone(self);
+        self.ctx
+            .borrow_mut()
+            .set_default_sink(name, move |_ok| this.schedule_refresh());
+    }
+
     pub fn set_card_profile(self: &Rc<Self>, card: &str, profile: &str) {
         let this = Rc::clone(self);
         self.ctx.borrow().introspect().set_card_profile_by_name(
@@ -305,6 +384,33 @@ fn source_entry(info: &SourceInfo) -> SourceEntry {
             .or(info.name.as_deref())
             .unwrap_or("Unknown device")
             .to_string(),
+        muted: info.mute,
+        volume_pct: volume_pct(info.volume.avg()),
+        volumes: info.volume,
+        rate: info.sample_spec.rate,
+        channels: info.sample_spec.channels,
+        format: format!("{:?}", info.sample_spec.format),
+        channel_map: info.channel_map.print(),
+        driver: info.driver.as_deref().unwrap_or("unknown").to_string(),
+        card: info.card,
+        bus: prop("device.bus"),
+        form_factor: prop("device.form_factor"),
+        state: format!("{:?}", info.state),
+        is_default: false,
+    }
+}
+
+fn sink_entry(info: &SinkInfo) -> SinkEntry {
+    let prop = |k: &str| info.proplist.get_str(k);
+    let name = info.name.as_deref().unwrap_or_default().to_string();
+    SinkEntry {
+        description: info
+            .description
+            .as_deref()
+            .or(info.name.as_deref())
+            .unwrap_or("Unknown device")
+            .to_string(),
+        name,
         muted: info.mute,
         volume_pct: volume_pct(info.volume.avg()),
         volumes: info.volume,

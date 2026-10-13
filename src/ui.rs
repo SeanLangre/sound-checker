@@ -9,7 +9,7 @@ use gtk::glib;
 use crate::activity::ActivityMonitor;
 use crate::analysis::{ChannelLevel, Status, FLOOR_DB};
 use crate::capture::{Capture, CaptureState, RecordState, RECORD_SECS};
-use crate::pulse::{Backend, CardEntry, Event, Model, SourceEntry};
+use crate::pulse::{Backend, CardEntry, Event, Model, SinkEntry, SourceEntry};
 use crate::wireplumber::{self, DisabledEntry};
 
 const METER_MIN_DB: f32 = -60.0;
@@ -21,6 +21,8 @@ const RED_DB: f32 = -3.0;
 enum RowKind {
     /// Source name and whether it is muted.
     Source(String, bool),
+    /// Output (sink) name.
+    Sink(String),
     BluetoothCard,
     /// An input blocked system-wide (from the saved state).
     Disabled,
@@ -31,6 +33,7 @@ impl RowKind {
         match self {
             RowKind::Source(_, false) => "Unmuted",
             RowKind::Source(_, true) => "Muted",
+            RowKind::Sink(_) => "Outputs",
             RowKind::BluetoothCard => "No microphone",
             RowKind::Disabled => "Disabled",
         }
@@ -48,6 +51,8 @@ struct State {
     rows: Vec<RowKind>,
     /// The input shown in the right-hand pane.
     selected: Option<String>,
+    /// When set, the pane shows this output instead of `selected`.
+    selected_sink: Option<String>,
     /// The input being captured and metered; changed only by the test button.
     testing: Option<String>,
     /// What the running capture was started with, to detect spec changes.
@@ -97,6 +102,8 @@ struct Ui {
     record_label: gtk::Label,
     test_btn: gtk::Button,
     mute_btn: gtk::Button,
+    default_btn: gtk::Button,
+    music_btn: gtk::Button,
     /// Meters, stats, waveform, status and recording controls.
     capture_widgets: Vec<gtk::Widget>,
     sys_row: gtk::Box,
@@ -217,11 +224,18 @@ impl Ui {
         sys_row.append(&disable_btn);
         sys_row.append(&sys_note);
         sys_row.set_visible(false);
+        let music_btn = gtk::Button::with_label("Switch to music mode (no mic)");
+        music_btn.set_valign(gtk::Align::Start);
+        music_btn.set_visible(false);
+        let default_btn = gtk::Button::with_label("Set as default");
+        default_btn.set_valign(gtk::Align::Start);
         let mute_btn = gtk::Button::with_label("Mute");
         mute_btn.set_valign(gtk::Align::Start);
         let actions = gtk::Box::builder().spacing(8).build();
         actions.append(&mute_btn);
+        actions.append(&default_btn);
         actions.append(&sys_row);
+        actions.append(&music_btn);
 
         let details = label("");
         details.set_selectable(true);
@@ -346,6 +360,8 @@ impl Ui {
             record_label,
             test_btn,
             mute_btn,
+            default_btn,
+            music_btn,
             capture_widgets,
             sys_row,
             disable_btn,
@@ -357,6 +373,7 @@ impl Ui {
                 model: Model::default(),
                 rows: Vec::new(),
                 selected: None,
+                selected_sink: None,
                 testing: None,
                 capture_spec: None,
                 capture: None,
@@ -451,7 +468,9 @@ impl Ui {
         let w = weak.clone();
         self.unmute_btn.connect_clicked(move |_| {
             if let Some(ui) = w.upgrade() {
-                if let (Some(b), Some(s)) = (ui.backend(), ui.selected_source()) {
+                if let (Some(b), Some(k)) = (ui.backend(), ui.selected_sink_entry()) {
+                    b.set_sink_mute(&k.name, false);
+                } else if let (Some(b), Some(s)) = (ui.backend(), ui.selected_source()) {
                     b.set_mute(&s.name, false);
                 }
             }
@@ -459,7 +478,9 @@ impl Ui {
         let w = weak.clone();
         self.volume_btn.connect_clicked(move |_| {
             if let Some(ui) = w.upgrade() {
-                if let (Some(b), Some(s)) = (ui.backend(), ui.selected_source()) {
+                if let (Some(b), Some(k)) = (ui.backend(), ui.selected_sink_entry()) {
+                    b.reset_sink_volume(&k);
+                } else if let (Some(b), Some(s)) = (ui.backend(), ui.selected_source()) {
                     b.reset_volume(&s);
                 }
             }
@@ -467,9 +488,27 @@ impl Ui {
         let w = weak.clone();
         self.mute_btn.connect_clicked(move |_| {
             if let Some(ui) = w.upgrade() {
-                if let (Some(b), Some(s)) = (ui.backend(), ui.selected_source()) {
+                if let (Some(b), Some(k)) = (ui.backend(), ui.selected_sink_entry()) {
+                    b.set_sink_mute(&k.name, !k.muted);
+                } else if let (Some(b), Some(s)) = (ui.backend(), ui.selected_source()) {
                     b.set_mute(&s.name, !s.muted);
                 }
+            }
+        });
+        let w = weak.clone();
+        self.default_btn.connect_clicked(move |_| {
+            if let Some(ui) = w.upgrade() {
+                if let (Some(b), Some(k)) = (ui.backend(), ui.selected_sink_entry()) {
+                    b.set_default_sink(&k.name);
+                } else if let (Some(b), Some(s)) = (ui.backend(), ui.selected_source()) {
+                    b.set_default_source(&s.name);
+                }
+            }
+        });
+        let w = weak.clone();
+        self.music_btn.connect_clicked(move |_| {
+            if let Some(ui) = w.upgrade() {
+                ui.confirm_music_mode();
             }
         });
         let w = weak.clone();
@@ -532,6 +571,12 @@ impl Ui {
 
     fn backend(&self) -> Option<Rc<Backend>> {
         self.state.borrow().backend.clone()
+    }
+
+    fn selected_sink_entry(&self) -> Option<SinkEntry> {
+        let st = self.state.borrow();
+        let name = st.selected_sink.as_ref()?;
+        st.model.sinks.iter().find(|s| &s.name == name).cloned()
     }
 
     fn selected_source(&self) -> Option<SourceEntry> {
@@ -612,6 +657,39 @@ impl Ui {
                 }
                 self.list.append(&row);
                 rows.push(RowKind::Source(s.name.clone(), s.muted));
+            }
+            for k in &st.model.sinks {
+                let row = adw::ActionRow::builder()
+                    .title(glib::markup_escape_text(&k.description))
+                    .subtitle(glib::markup_escape_text(&sink_subtitle(k)))
+                    .build();
+                row.add_prefix(&gtk::Image::from_icon_name("audio-speakers-symbolic"));
+                let (icon, tip) = if k.muted {
+                    ("audio-volume-muted-symbolic", "Muted — click to unmute")
+                } else {
+                    ("audio-volume-high-symbolic", "Click to mute")
+                };
+                let mute = gtk::Button::builder()
+                    .icon_name(icon)
+                    .tooltip_text(tip)
+                    .valign(gtk::Align::Center)
+                    .css_classes(["flat", "circular"])
+                    .build();
+                let weak = Rc::downgrade(self);
+                let (name, muted) = (k.name.clone(), k.muted);
+                mute.connect_clicked(move |_| {
+                    if let Some(b) = weak.upgrade().and_then(|ui| ui.backend()) {
+                        b.set_sink_mute(&name, !muted);
+                    }
+                });
+                row.add_suffix(&mute);
+                if k.is_default {
+                    let tag = gtk::Label::new(Some("default"));
+                    tag.add_css_class("dim-label");
+                    row.add_suffix(&tag);
+                }
+                self.list.append(&row);
+                rows.push(RowKind::Sink(k.name.clone()));
             }
             for c in st.model.bluetooth_without_mic() {
                 let row = adw::ActionRow::builder()
@@ -815,6 +893,40 @@ impl Ui {
         });
     }
 
+    /// The Bluetooth card behind `source` and its A2DP profile name, if it has one.
+    fn music_card(&self, source: &SourceEntry) -> Option<(String, String)> {
+        let st = self.state.borrow();
+        let card = st.model.cards.iter().find(|c| Some(c.index) == source.card)?;
+        Some((card.name.clone(), card.music_profile_hint()?.name.clone()))
+    }
+
+    fn confirm_music_mode(self: &Rc<Self>) {
+        let Some(source) = self.selected_source() else { return };
+        let Some((card, profile)) = self.music_card(&source) else { return };
+        let body = format!(
+            "“{}” will switch to music (A2DP) mode. Its microphone disappears for every app and \
+             audio may cut out briefly. Some apps (e.g. a call app) may switch it back to headset \
+             mode when they ask for a mic.",
+            source.description
+        );
+        #[allow(deprecated)]
+        {
+            let dlg = adw::MessageDialog::new(Some(&self.window), Some("Switch to music mode?"), Some(&body));
+            dlg.add_responses(&[("cancel", "Cancel"), ("switch", "Switch")]);
+            dlg.set_default_response(Some("cancel"));
+            dlg.set_close_response("cancel");
+            let weak = Rc::downgrade(self);
+            dlg.connect_response(None, move |_, response| {
+                if let (Some(ui), "switch") = (weak.upgrade(), response) {
+                    if let Some(b) = ui.backend() {
+                        b.set_card_profile(&card, &profile);
+                    }
+                }
+            });
+            dlg.present();
+        }
+    }
+
     fn confirm_switch_to_headset(self: &Rc<Self>, card_name: &str) {
         let desc = self
             .state
@@ -866,10 +978,16 @@ impl Ui {
 
     fn on_row_selected(self: &Rc<Self>, index: usize) {
         let kind = self.state.borrow().rows.get(index).cloned();
-        if let Some(RowKind::Source(name, _)) = kind {
-            self.state.borrow_mut().selected = Some(name);
-            self.sync_selection();
+        match kind {
+            Some(RowKind::Source(name, _)) => {
+                let mut st = self.state.borrow_mut();
+                st.selected = Some(name);
+                st.selected_sink = None;
+            }
+            Some(RowKind::Sink(name)) => self.state.borrow_mut().selected_sink = Some(name),
+            _ => return,
         }
+        self.sync_selection();
     }
 
     /// Reconcile the selection / capture with the latest model.
@@ -916,37 +1034,6 @@ impl Ui {
             }
         }
 
-        let source = self.selected_source();
-        self.placeholder.set_visible(source.is_none());
-        self.analysis.set_visible(source.is_some());
-        if gone {
-            self.placeholder.set_label("The selected device was disconnected.");
-        }
-        let Some(source) = source else { return };
-
-        // Reflect selection in the list without re-triggering.
-        self.rebuilding.set(true);
-        let idx = self
-            .state
-            .borrow()
-            .rows
-            .iter()
-            .position(|r| matches!(r, RowKind::Source(n, _) if *n == source.name));
-        if let Some(row) = idx.and_then(|i| self.list.row_at_index(i as i32)) {
-            self.list.select_row(Some(&row));
-        }
-        self.rebuilding.set(false);
-
-        self.update_source_info(&source);
-        self.sys_row.set_visible(self.state.borrow().model.is_pipewire());
-
-        // The meters belong to the tested input; for any other one offer a button.
-        let viewing_other = self.state.borrow().testing.as_deref() != Some(source.name.as_str());
-        for w in &self.capture_widgets {
-            w.set_visible(!viewing_other);
-        }
-        self.test_btn.set_visible(viewing_other);
-
         // (Re)start capture when the tested device or its format changed.
         let testing = {
             let st = self.state.borrow();
@@ -960,6 +1047,111 @@ impl Ui {
                 self.start_capture(&t);
             }
         }
+
+        // An output selected: show it instead of the input.
+        let sink = {
+            let mut st = self.state.borrow_mut();
+            let present = st
+                .selected_sink
+                .as_ref()
+                .is_some_and(|n| st.model.sinks.iter().any(|k| &k.name == n));
+            if !present {
+                st.selected_sink = None;
+            }
+            drop(st);
+            self.selected_sink_entry()
+        };
+        if let Some(sink) = sink {
+            self.placeholder.set_visible(false);
+            self.analysis.set_visible(true);
+            self.select_row(|r| matches!(r, RowKind::Sink(n) if *n == sink.name));
+            self.show_sink(&sink);
+            return;
+        }
+
+        let source = self.selected_source();
+        self.placeholder.set_visible(source.is_none());
+        self.analysis.set_visible(source.is_some());
+        if gone {
+            self.placeholder.set_label("The selected device was disconnected.");
+        }
+        let Some(source) = source else { return };
+
+        self.select_row(|r| matches!(r, RowKind::Source(n, _) if *n == source.name));
+
+        self.update_source_info(&source);
+        // A Bluetooth mic can't be blocked per node without breaking playback
+        // (mic and speaker share one link); drop the mic via the profile instead.
+        let is_bt = source.bus.as_deref() == Some("bluetooth");
+        self.sys_row.set_visible(!is_bt && self.state.borrow().model.is_pipewire());
+        self.music_btn.set_visible(is_bt && self.music_card(&source).is_some());
+
+        // The meters belong to the tested input; for any other one offer a button.
+        let viewing_other = self.state.borrow().testing.as_deref() != Some(source.name.as_str());
+        for w in &self.capture_widgets {
+            w.set_visible(!viewing_other);
+        }
+        self.test_btn.set_visible(viewing_other);
+
+        self.default_btn.set_visible(!source.is_default);
+    }
+
+    /// Reflect the selection in the list without re-triggering.
+    fn select_row(&self, is_it: impl Fn(&RowKind) -> bool) {
+        self.rebuilding.set(true);
+        let idx = self.state.borrow().rows.iter().position(is_it);
+        if let Some(row) = idx.and_then(|i| self.list.row_at_index(i as i32)) {
+            self.list.select_row(Some(&row));
+        }
+        self.rebuilding.set(false);
+    }
+
+    fn show_sink(&self, k: &SinkEntry) {
+        self.title.set_text(&k.description);
+        let mut problems = Vec::new();
+        if k.muted {
+            problems.push("This output is muted.".to_string());
+        } else if k.volume_pct == 0 {
+            problems.push("Output volume is 0%.".to_string());
+        } else if k.volume_pct != 100 {
+            problems.push(format!("Output volume is {}%.", k.volume_pct));
+        }
+        self.warn_label.set_text(&problems.join(" "));
+        self.mute_btn.set_label(if k.muted { "Unmute" } else { "Mute" });
+        self.unmute_btn.set_visible(k.muted);
+        self.volume_btn.set_visible(k.volume_pct != 100);
+        self.warn_row.set_visible(k.muted || k.volume_pct != 100);
+        for w in &self.capture_widgets {
+            w.set_visible(false);
+        }
+        self.test_btn.set_visible(false);
+        self.sys_row.set_visible(false);
+        self.music_btn.set_visible(false);
+        self.default_btn.set_visible(!k.is_default);
+
+        let st = self.state.borrow();
+        let card = k
+            .card
+            .and_then(|i| st.model.cards.iter().find(|c| c.index == i))
+            .map(|c| {
+                format!("{} (profile: {})", c.description, c.active_profile.as_deref().unwrap_or("none"))
+            })
+            .unwrap_or_else(|| "none".into());
+        self.details.set_text(&format!(
+            "Name:        {}\nSample rate: {} Hz\nFormat:      {}\nChannels:    {} ({})\nDriver:      {}\nBus:         {}\nForm factor: {}\nState:       {}\nVolume:      {}%{}\nCard:        {}",
+            k.name,
+            k.rate,
+            k.format,
+            k.channels,
+            k.channel_map,
+            k.driver,
+            k.bus.as_deref().unwrap_or("unknown"),
+            k.form_factor.as_deref().unwrap_or("unknown"),
+            k.state,
+            k.volume_pct,
+            if k.muted { " (muted)" } else { "" },
+            card,
+        ));
     }
 
     fn start_capture(&self, source: &SourceEntry) {
@@ -1158,6 +1350,19 @@ fn source_subtitle(s: &SourceEntry) -> String {
     };
     let ch = if s.channels == 1 { "mono".to_string() } else { format!("{}ch", s.channels) };
     format!("{kind} · {:.1} kHz · {ch}", s.rate as f32 / 1000.0)
+}
+
+fn sink_subtitle(k: &SinkEntry) -> String {
+    let kind = match (k.bus.as_deref(), k.form_factor.as_deref()) {
+        (Some("bluetooth"), _) => "Bluetooth",
+        (Some("usb"), _) => "USB",
+        (_, Some("hdmi")) => "HDMI",
+        (_, Some("headphone" | "headset")) => "Headphones",
+        (_, Some("speaker" | "internal")) => "Speakers",
+        (Some("pci"), _) => "Internal",
+        _ => "Output",
+    };
+    format!("{kind} · {:.1} kHz", k.rate as f32 / 1000.0)
 }
 
 fn channel_names(s: &SourceEntry) -> Vec<String> {

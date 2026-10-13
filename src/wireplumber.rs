@@ -167,10 +167,38 @@ fn is_connected(mac: &str) -> bool {
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("Connected: yes"))
 }
 
+fn pactl(args: &[&str]) -> String {
+    Command::new("pactl")
+        .args(args)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// The default sink and source, read before WirePlumber restarts.
+fn defaults() -> (String, String) {
+    (pactl(&["get-default-sink"]), pactl(&["get-default-source"]))
+}
+
+/// A restarted WirePlumber re-picks its defaults and can bypass virtual
+/// devices (e.g. EasyEffects), so put the previous ones back.
+fn restore_defaults((sink, source): &(String, String)) {
+    for (get, set, list, name) in [
+        ("get-default-sink", "set-default-sink", "sinks", sink),
+        ("get-default-source", "set-default-source", "sources", source),
+    ] {
+        let exists = pactl(&["list", "short", list]).lines().any(|l| l.split('\t').nth(1) == Some(name));
+        if !name.is_empty() && exists && pactl(&[get]) != *name {
+            pactl(&[set, name]);
+        }
+    }
+}
+
 /// Restart WirePlumber, which drops Bluetooth audio links, then reconnect the
 /// devices that were connected before. Blocking; run off the main thread.
 pub fn restart() -> Result<(), String> {
     let before = connected_bluetooth();
+    let saved_defaults = defaults();
     let out = Command::new("systemctl")
         .args(["--user", "restart", "wireplumber.service"])
         .output()
@@ -178,9 +206,12 @@ pub fn restart() -> Result<(), String> {
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
+    // Let it enumerate devices again before touching the defaults.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    restore_defaults(&saved_defaults);
     if !before.is_empty() {
         // Give devices a moment to come back by themselves first.
-        std::thread::sleep(std::time::Duration::from_secs(3));
+        std::thread::sleep(std::time::Duration::from_secs(1));
         for mac in before.iter().filter(|m| !is_connected(m)) {
             let _ = Command::new("bluetoothctl").args(["connect", mac]).output();
         }
