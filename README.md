@@ -34,13 +34,17 @@ Open tasks are in [TODO.md](TODO.md).
 
 ```
 ┌ Linux Sound Checker ─────────────────────────────────────────┐
-│ Input devices                 │ Live analysis                │
-│ ● Built-in Microphone   [sel] │  L ████████████░░░░  -6.2 dB │
-│   Internal · 48 kHz · 2ch     │  R ███████████░░░░░  -7.0 dB │
-│   ⚠ Muted  [Unmute]  vol 100% │  RMS -21.4 dBFS  Noise -62   │
-│ ○ USB Headset Microphone      │  ~~~~~ waveform ~~~~~        │
-│ ○ BT Headset (no mic: A2DP)   │  [● Record 5s] [▶ Play back] │
-│   [Switch to headset mode]    │  Status: OK / Clipping / ... │
+│ Inputs                        │ Live analysis                │
+│  Unmuted                      │  L ████████████░░░░  -6.2 dB │
+│ ▌Built-in Microphone  default │  R ███████████░░░░░  -7.0 dB │
+│ ▌USB Headset Microphone    🎤 │  RMS -21.4 dBFS  Noise -62   │
+│  Muted                        │  ~~~~~ waveform ~~~~~        │
+│ ▌Webcam Mic (red)          🔇 │  Status: OK / Clipping / ... │
+│  No microphone                │  [● Record 5s] [▶ Play back] │
+│ BT Headset [Switch to headset]│  [Mute] [Rename…] [Disable…] │
+│ Outputs                       │                              │
+│  Unmuted                      │                              │
+│ ▌Speakers (green: playing) 🔊 │                              │
 └───────────────────────────────┴──────────────────────────────┘
 ```
 

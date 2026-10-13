@@ -214,6 +214,9 @@ impl Ui {
         stats.add_css_class("monospace");
         let status = label("");
         status.add_css_class("heading");
+        // Room for two lines so long messages don't resize the pane under the meters.
+        status.set_height_request(44);
+        status.set_yalign(0.0);
 
         let record_btn = gtk::Button::with_label(&format!("● Record {RECORD_SECS} s"));
         let play_btn = gtk::Button::with_label("▶ Play back");
