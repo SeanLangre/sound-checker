@@ -199,14 +199,22 @@ struct Ui {
 
 const CSS: &str = "
 row.src-active {
-  background-color: alpha(@success_bg_color, 0.45);
+  background-color: alpha(mix(@success_bg_color, #808080, 0.55), 0.35);
   transition: background-color 100ms ease-out, opacity 100ms ease-out;
 }
 row.src-idle {
   opacity: 0.5;
+  transition: background-color 100ms ease-out, opacity 100ms ease-out;
+}
+row.src-idle.src-fade {
   transition: background-color 3s ease-out, opacity 3s ease-out;
 }
-row.src-muted { background-color: alpha(@error_bg_color, 0.4); }
+row.src-muted { background-color: alpha(mix(@error_bg_color, #808080, 0.55), 0.3); }
+row.src-active:hover { background-color: alpha(mix(@success_bg_color, #808080, 0.3), 0.5); }
+row.src-muted:hover { background-color: alpha(mix(@error_bg_color, #808080, 0.3), 0.45); }
+row.src-active:selected { background-color: alpha(@success_bg_color, 0.75); transition: none; }
+row.src-muted:selected { background-color: alpha(@error_bg_color, 0.7); transition: none; }
+row.src-idle:selected { opacity: 1; transition: none; background-color: alpha(@window_fg_color, 0.22); }
 ";
 
 #[allow(deprecated)] // the display-wide provider call is the only way to style list rows
@@ -1437,6 +1445,12 @@ impl Ui {
             };
             if row.has_css_class(want) {
                 continue;
+            }
+            // Only a row that was just active fades out slowly.
+            let fade = want == "src-idle" && row.has_css_class("src-active");
+            row.remove_css_class("src-fade");
+            if fade {
+                row.add_css_class("src-fade");
             }
             for c in CLASSES.into_iter().filter(|c| *c != want) {
                 row.remove_css_class(c);
