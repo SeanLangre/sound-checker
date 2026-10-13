@@ -22,6 +22,9 @@ const REFRESH_DEBOUNCE: Duration = Duration::from_millis(150);
 #[derive(Debug, Clone)]
 pub struct SourceEntry {
     pub name: String,
+    /// PipeWire `node.name` (what WirePlumber rules match on).
+    pub node_name: String,
+    pub device_name: Option<String>,
     pub description: String,
     pub muted: bool,
     pub volume_pct: u32,
@@ -48,6 +51,7 @@ pub struct ProfileEntry {
 pub struct CardEntry {
     pub index: u32,
     pub name: String,
+    pub device_name: Option<String>,
     pub description: String,
     pub bus: Option<String>,
     pub active_profile: Option<String>,
@@ -81,9 +85,14 @@ impl CardEntry {
 pub struct Model {
     pub sources: Vec<SourceEntry>,
     pub cards: Vec<CardEntry>,
+    pub server_name: String,
 }
 
 impl Model {
+    pub fn is_pipewire(&self) -> bool {
+        self.server_name.contains("PipeWire")
+    }
+
     /// Bluetooth cards in A2DP with no capture source of their own, i.e. the
     /// headsets that look like they have "no mic".
     pub fn bluetooth_without_mic(&self) -> impl Iterator<Item = &CardEntry> {
@@ -229,6 +238,8 @@ impl Backend {
                                 *default_d.borrow_mut() =
                                     info.default_source_name.as_ref().map(|s| s.to_string());
                                 let mut m = model_d.borrow().clone();
+                                m.server_name =
+                                    info.server_name.as_deref().unwrap_or_default().to_string();
                                 for s in &mut m.sources {
                                     s.is_default =
                                         default_d.borrow().as_deref() == Some(s.name.as_str());
@@ -283,8 +294,11 @@ impl Backend {
 
 fn source_entry(info: &SourceInfo) -> SourceEntry {
     let prop = |k: &str| info.proplist.get_str(k);
+    let name = info.name.as_deref().unwrap_or_default().to_string();
     SourceEntry {
-        name: info.name.as_deref().unwrap_or_default().to_string(),
+        node_name: prop("node.name").unwrap_or_else(|| name.clone()),
+        device_name: prop("device.name"),
+        name,
         description: info
             .description
             .as_deref()
@@ -311,6 +325,7 @@ fn card_entry(info: &CardInfo) -> CardEntry {
     CardEntry {
         index: info.index,
         name: info.name.as_deref().unwrap_or_default().to_string(),
+        device_name: info.proplist.get_str("device.name"),
         description: info
             .proplist
             .get_str("device.description")

@@ -10,6 +10,7 @@ use crate::activity::ActivityMonitor;
 use crate::analysis::{ChannelLevel, Status, FLOOR_DB};
 use crate::capture::{Capture, CaptureState, RecordState, RECORD_SECS};
 use crate::pulse::{Backend, CardEntry, Event, Model, SourceEntry};
+use crate::wireplumber::{self, DisabledEntry};
 
 const METER_MIN_DB: f32 = -60.0;
 const METER_ROW_H: i32 = 28;
@@ -21,6 +22,8 @@ enum RowKind {
     /// Source name and whether it is muted.
     Source(String, bool),
     BluetoothCard,
+    /// An input blocked system-wide (from the saved state).
+    Disabled,
 }
 
 impl RowKind {
@@ -29,6 +32,7 @@ impl RowKind {
             RowKind::Source(_, false) => "Unmuted",
             RowKind::Source(_, true) => "Muted",
             RowKind::BluetoothCard => "No microphone",
+            RowKind::Disabled => "Disabled",
         }
     }
 }
@@ -48,7 +52,22 @@ struct State {
     capture: Option<Capture>,
     backend: Option<Rc<Backend>>,
     activity: ActivityMonitor,
+    disabled: Vec<DisabledEntry>,
+    can_restart: bool,
+    pending: Option<Pending>,
+    pending_token: u32,
 }
+
+/// A WirePlumber change waiting for the source list to reflect it.
+struct Pending {
+    node_name: String,
+    description: String,
+    want_disabled: bool,
+    token: u32,
+}
+
+/// How long to wait for the source list after restarting WirePlumber.
+const APPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 struct Ui {
     window: adw::ApplicationWindow,
@@ -73,6 +92,10 @@ struct Ui {
     record_btn: gtk::Button,
     play_btn: gtk::Button,
     record_label: gtk::Label,
+    sys_row: gtk::Box,
+    disable_btn: gtk::Button,
+    banner: adw::Banner,
+    toasts: adw::ToastOverlay,
 
     meter_data: Rc<RefCell<MeterData>>,
     wave_data: Rc<RefCell<Vec<(f32, f32)>>>,
@@ -176,6 +199,18 @@ impl Ui {
         rec_row.append(&play_btn);
         rec_row.append(&record_label);
 
+        let disable_btn = gtk::Button::with_label("Disable system-wide…");
+        disable_btn.set_valign(gtk::Align::Center);
+        let sys_note = label(
+            "Hides this input from every app using PipeWire. Direct ALSA access (arecord -D hw:N) still works.",
+        );
+        sys_note.add_css_class("dim-label");
+        sys_note.set_hexpand(true);
+        let sys_row = gtk::Box::builder().spacing(8).build();
+        sys_row.append(&disable_btn);
+        sys_row.append(&sys_note);
+        sys_row.set_visible(false);
+
         let details = label("");
         details.set_selectable(true);
         details.add_css_class("monospace");
@@ -198,6 +233,7 @@ impl Ui {
             wave.upcast_ref(),
             status.upcast_ref(),
             rec_row.upcast_ref(),
+            sys_row.upcast_ref(),
             expander.upcast_ref(),
         ] {
             analysis.append(w);
@@ -243,7 +279,11 @@ impl Ui {
 
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&adw::HeaderBar::new());
-        toolbar.set_content(Some(&stack));
+        let banner = adw::Banner::new("");
+        toolbar.add_top_bar(&banner);
+        let toasts = adw::ToastOverlay::new();
+        toasts.set_child(Some(&stack));
+        toolbar.set_content(Some(&toasts));
 
         let window = adw::ApplicationWindow::builder()
             .application(app)
@@ -274,6 +314,10 @@ impl Ui {
             record_btn,
             play_btn,
             record_label,
+            sys_row,
+            disable_btn,
+            banner,
+            toasts,
             meter_data: Rc::new(RefCell::new(MeterData::default())),
             wave_data: Rc::new(RefCell::new(Vec::new())),
             state: RefCell::new(State {
@@ -284,6 +328,10 @@ impl Ui {
                 capture: None,
                 backend: None,
                 activity: ActivityMonitor::default(),
+                disabled: wireplumber::load(),
+                can_restart: wireplumber::can_restart(),
+                pending: None,
+                pending_token: 0,
             }),
         });
 
@@ -382,6 +430,14 @@ impl Ui {
             }
         });
         let w = weak.clone();
+        self.disable_btn.connect_clicked(move |_| {
+            if let Some(ui) = w.upgrade() {
+                if let Some(s) = ui.selected_source() {
+                    ui.confirm_disable(&s);
+                }
+            }
+        });
+        let w = weak.clone();
         self.record_btn.connect_clicked(move |_| {
             if let Some(ui) = w.upgrade() {
                 if let Some(c) = &ui.state.borrow().capture {
@@ -451,6 +507,7 @@ impl Ui {
                         activity.sync(&b.ctx, &model.sources);
                     }
                 }
+                self.check_pending();
                 self.rebuild_list();
                 self.sync_selection();
             }
@@ -510,11 +567,183 @@ impl Ui {
                 self.list.append(&row);
                 rows.push(RowKind::BluetoothCard);
             }
+            for e in &st.disabled {
+                let present = st.model.sources.iter().any(|s| s.node_name == e.node_name);
+                let card_present = st.model.cards.iter().any(|c| {
+                    e.device_name.as_deref().is_some_and(|d| {
+                        c.device_name.as_deref() == Some(d) || c.name == d
+                    })
+                });
+                let status = if present {
+                    "Rule saved — input still visible"
+                } else if card_present {
+                    "Connected — blocked"
+                } else {
+                    "Not connected"
+                };
+                let row = adw::ActionRow::builder()
+                    .title(glib::markup_escape_text(&e.description))
+                    .subtitle(status)
+                    .activatable(false)
+                    .build();
+                row.add_prefix(&gtk::Image::from_icon_name("microphone-disabled-symbolic"));
+                let btn = gtk::Button::builder().label("Enable").valign(gtk::Align::Center).build();
+                let weak = Rc::downgrade(self);
+                let node = e.node_name.clone();
+                btn.connect_clicked(move |_| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.enable_input(&node);
+                    }
+                });
+                row.add_suffix(&btn);
+                self.list.append(&row);
+                rows.push(RowKind::Disabled);
+            }
         }
         self.state.borrow_mut().rows = rows;
         // Header funcs ran while rows were being appended, before `rows` was set.
         self.list.invalidate_headers();
         self.rebuilding.set(false);
+    }
+
+    fn toast(&self, text: &str) {
+        self.toasts.add_toast(adw::Toast::new(text));
+    }
+
+    fn confirm_disable(self: &Rc<Self>, source: &SourceEntry) {
+        let mut body = format!(
+            "“{}” will disappear from every app (Discord, browsers, OBS) until you enable it again. \
+             All audio is interrupted while WirePlumber restarts, and Bluetooth headphones will disconnect \
+             briefly; the app reconnects them afterwards.",
+            source.description
+        );
+        if source.is_default {
+            body.push_str("\n\nThis is the default input; apps will fall back to another one.");
+        }
+        #[allow(deprecated)]
+        let dlg = adw::MessageDialog::new(Some(&self.window), Some("Disable system-wide?"), Some(&body));
+        #[allow(deprecated)]
+        {
+            dlg.add_responses(&[("cancel", "Cancel"), ("disable", "Disable")]);
+            dlg.set_response_appearance("disable", adw::ResponseAppearance::Destructive);
+            dlg.set_default_response(Some("cancel"));
+            dlg.set_close_response("cancel");
+            let weak = Rc::downgrade(self);
+            let source = source.clone();
+            dlg.connect_response(None, move |_, response| {
+                if let (Some(ui), "disable") = (weak.upgrade(), response) {
+                    ui.disable_input(&source);
+                }
+            });
+        }
+        dlg.present();
+    }
+
+    fn disable_input(self: &Rc<Self>, source: &SourceEntry) {
+        let mut entries = self.state.borrow().disabled.clone();
+        entries.retain(|e| e.node_name != source.node_name);
+        entries.push(DisabledEntry::new(
+            source.node_name.clone(),
+            source.device_name.clone(),
+            source.description.clone(),
+            source.bus.clone(),
+        ));
+        {
+            // Release the device before it vanishes.
+            let mut st = self.state.borrow_mut();
+            if st.selected.as_deref() == Some(source.name.as_str()) {
+                st.capture = None;
+                st.capture_spec = None;
+            }
+        }
+        self.apply(entries, source.node_name.clone(), source.description.clone(), true);
+    }
+
+    fn enable_input(self: &Rc<Self>, node_name: &str) {
+        let mut entries = self.state.borrow().disabled.clone();
+        let Some(pos) = entries.iter().position(|e| e.node_name == node_name) else { return };
+        let removed = entries.remove(pos);
+        self.apply(entries, removed.node_name, removed.description, false);
+    }
+
+    /// Save the new rule set, restart WirePlumber and wait for the source list.
+    fn apply(
+        self: &Rc<Self>,
+        entries: Vec<DisabledEntry>,
+        node_name: String,
+        description: String,
+        want_disabled: bool,
+    ) {
+        if let Err(e) = wireplumber::write_all(&entries) {
+            self.toast(&format!("Failed: could not write the configuration ({e})"));
+            return;
+        }
+        let (token, can_restart) = {
+            let mut st = self.state.borrow_mut();
+            st.disabled = entries;
+            st.pending_token += 1;
+            let token = st.pending_token;
+            if st.can_restart {
+                st.pending = Some(Pending { node_name, description, want_disabled, token });
+            }
+            (token, st.can_restart)
+        };
+        self.rebuild_list();
+        if !can_restart {
+            self.toast("Saved. It applies after you log in again.");
+            return;
+        }
+        self.banner.set_title("Applying…");
+        self.banner.set_revealed(true);
+
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let result = gtk::gio::spawn_blocking(wireplumber::restart)
+                .await
+                .unwrap_or_else(|_| Err("restart task panicked".into()));
+            if let (Err(e), Some(ui)) = (result, weak.upgrade()) {
+                ui.finish_pending(token, Err(e));
+            }
+        });
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local_once(APPLY_TIMEOUT, move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.finish_pending(token, Err("timed out waiting for the input list to change".into()));
+            }
+        });
+    }
+
+    /// Resolve the pending change once the node's presence matches the goal.
+    fn check_pending(&self) {
+        let done = {
+            let st = self.state.borrow();
+            st.pending.as_ref().filter(|p| {
+                let present = st.model.sources.iter().any(|s| s.node_name == p.node_name);
+                present != p.want_disabled
+            }).map(|p| p.token)
+        };
+        if let Some(token) = done {
+            self.finish_pending(token, Ok(()));
+        }
+    }
+
+    fn finish_pending(&self, token: u32, result: Result<(), String>) {
+        let Some(p) = ({
+            let mut st = self.state.borrow_mut();
+            if st.pending.as_ref().is_some_and(|p| p.token == token) {
+                st.pending.take()
+            } else {
+                None
+            }
+        }) else {
+            return;
+        };
+        self.banner.set_revealed(false);
+        self.toast(&match (result, p.want_disabled) {
+            (Ok(()), true) => format!("Active: “{}” is blocked system-wide", p.description),
+            (Ok(()), false) => format!("“{}” is available again", p.description),
+            (Err(e), _) => format!("Failed: {e}"),
+        });
     }
 
     fn switch_to_headset(&self, card_name: &str) {
@@ -594,6 +823,7 @@ impl Ui {
         self.rebuilding.set(false);
 
         self.update_source_info(&source);
+        self.sys_row.set_visible(self.state.borrow().model.is_pipewire());
 
         // (Re)start capture when the device or its format changed.
         let spec = (source.name.clone(), source.rate, source.channels);

@@ -3,6 +3,7 @@ mod analysis;
 mod capture;
 mod pulse;
 mod ui;
+mod wireplumber;
 
 use adw::prelude::*;
 
