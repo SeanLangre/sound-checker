@@ -31,23 +31,6 @@ Open tasks are in [TODO.md](TODO.md).
 | Device details          | Sample rate, format, channel map, driver, card/bus info                   |
 | Live monitoring         | Every unmuted input and every output (via its monitor source) is metered continuously; selecting a device just shows its meters, waveform and recording. Captures don't keep sleeping devices awake. Muted inputs show "Muted" and an empty meter (the server mutes before the app can see the signal) |
 
-## UI sketch
-
-```
-┌ Linux Sound Checker ── [ Sound | Recording ] ────────────────┐
-│ Unmuted                       │ Live analysis                │
-│ ▌Built-in Microphone  default │  L ████████████░░░░  -6.2 dB │
-│ ▌USB Headset Microphone    🎤 │  R ███████████░░░░░  -7.0 dB │
-│ Muted                         │  RMS -21.4 dBFS  Noise -62   │
-│ ▌Webcam Mic (red)          🔇 │  ~~~~~ waveform ~~~~~        │
-│ No microphone                 │  Status: OK / Clipping / ... │
-│ BT Headset [Switch to headset]│  [● Record 5s] [▶ Play back] │
-│ Disabled                      │  [Mute] [Rename…] [Disable…] │
-│ ▌Old mic          [Enable]    │                              │
-└───────────────────────────────┴──────────────────────────────┘
-(the Sound tab lists outputs the same way; playing outputs are green)
-```
-
 ## Design decisions
 
 | Topic        | Choice                                                                 |
