@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Linux Sound Checker
+Comment=Test microphones and other audio inputs
+Exec=sound-checker
+Icon=audio-input-microphone
+Categories=AudioVideo;Audio;Settings;
+Terminal=false

@@ -1,0 +1,32 @@
+app-id: dev.soundchecker.SoundChecker
+runtime: org.gnome.Platform
+runtime-version: '49'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: sound-checker
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --share=ipc
+  # Talks to PipeWire / PulseAudio through the Pulse socket; never starts a server.
+  - --socket=pulseaudio
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/sound-checker/cargo
+modules:
+  - name: sound-checker
+    buildsystem: simple
+    build-commands:
+      # Generate cargo-sources.json first:
+      #   flatpak-cargo-generator.py Cargo.lock -o packaging/cargo-sources.json
+      - cargo --offline fetch --manifest-path Cargo.toml
+      - cargo --offline build --release --locked
+      - install -Dm755 target/release/sound-checker /app/bin/sound-checker
+      - install -Dm644 packaging/dev.soundchecker.SoundChecker.desktop /app/share/applications/dev.soundchecker.SoundChecker.desktop
+    sources:
+      - type: dir
+        path: ..
+      - cargo-sources.json

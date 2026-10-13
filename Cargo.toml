@@ -1,0 +1,12 @@
+[package]
+name = "sound-checker"
+version = "0.1.0"
+edition = "2021"
+description = "Test microphones and audio inputs on Linux"
+license = "MIT"
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.11", features = ["v4_10"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_4"] }
+libpulse-binding = "2.30"
+libpulse-glib-binding = "2.29"
