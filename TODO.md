@@ -10,14 +10,15 @@
 - [x] Device list split into Unmuted / Muted
 - [x] Activity colouring: green (fading over 3 s) for active, dimmed for idle, red for muted
 - [x] Output devices: list, mute, volume reset, set as default, Muted category, green while playing
-- [x] Inputs / Outputs headings
+- [x] Recording (inputs) and Sound (outputs) tabs replace the Inputs / Outputs headings
 - [x] Mute button on every device
 - [x] Per-output system-wide disable (same WirePlumber rule; hidden for Bluetooth)
 - [x] Set as default for inputs and outputs
 - [x] Rename devices (app-only, `names.json`)
 - [x] Meters, waveform and recording for outputs (monitor sources); every input and output is monitored automatically, selecting only changes the view
 - [x] Confirmation dialogs: system-wide disable, Bluetooth headset/music mode
-- [x] Restart side effects: restore default devices and reconnect Bluetooth after the WirePlumber restart
+- [x] Restart side effects: after the WirePlumber restart, restore default devices, move streams back, restore card profiles (reconnecting a Bluetooth headset that lost its music link) and log to `restart.log`
+- [x] Muted devices clear their meters and waveform instead of freezing the last picture
 
 
 ## System-wide mic disable
@@ -65,10 +66,16 @@ Open decisions:
 
 - [ ] Whole-device disable (all inputs of a card at once): proposed per-node only for now
 
+## Known issues
+
+- [ ] The WI-C100 headphones sometimes lose their A2DP link on their own (`Failure in Bluetooth audio transport`) and fall back to the headset profile. Not caused by the app as far as seen; check whether the continuous capture on every device or the restart makes it worse
+- [ ] The restart-and-restore for system-wide disable is unverified; read `restart.log` after a real disable/enable
+- [ ] Applying a rule always restarts WirePlumber (brief audio interruption); look for a way to avoid it, or add "Save, apply later"
+
 ## Stretch
 
 - [ ] Rename system-wide (WirePlumber `node.description` rule; needs the same restart)
-- [ ] Test tone / playback test for outputs
+- [ ] Test tone for outputs (the monitor shows what plays, but nothing generates a signal)
 
 - [ ] Live listen: mic -> output with mute control and a "use headphones" warning
       (module-loopback, or own playback stream if latency control is needed)
@@ -85,6 +92,7 @@ Open decisions:
 - [ ] Output rows: 3 s fade like inputs (same in-place row update as below)
 - [ ] Keep the 3 s fade running across list rebuilds (update rows in place instead of recreating them)
 
+- [ ] Tabs: check the header switcher in a narrow window (only the wide layout was considered; may need an adw::ViewSwitcherBar)
 - [ ] Verify against the testing matrix in README.md (hot-plug, BT HFP, 44.1 kHz, real PulseAudio)
 - [ ] Build and test the Flatpak (generate `packaging/cargo-sources.json`; confirm GNOME runtime version)
 - [ ] Test on Fedora

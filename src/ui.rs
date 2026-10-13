@@ -61,6 +61,8 @@ struct State {
     rows: Vec<RowKind>,
     /// The input shown in the right-hand pane.
     selected: Option<String>,
+    /// The Sound (outputs) tab is open; otherwise Recording (inputs).
+    sound_tab: bool,
     /// When set, the pane shows this output instead of `selected`.
     selected_sink: Option<String>,
     /// One capture per unmuted input and per output monitor, keyed by source name,
@@ -155,6 +157,7 @@ const APPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 struct Ui {
     window: adw::ApplicationWindow,
     stack: gtk::Stack,
+    tabs: adw::ViewStack,
     error_page: adw::StatusPage,
     list: gtk::ListBox,
     rebuilding: Cell<bool>,
@@ -399,7 +402,18 @@ impl Ui {
         stack.add_named(&error_page, Some("error"));
 
         let toolbar = adw::ToolbarView::new();
-        toolbar.add_top_bar(&adw::HeaderBar::new());
+        // The stack only models the two tabs; the panes below follow `sound_tab`.
+        let tabs = adw::ViewStack::new();
+        tabs.add_titled_with_icon(&gtk::Box::new(gtk::Orientation::Vertical, 0), Some("sound"), "Sound", "audio-speakers-symbolic");
+        tabs.add_titled_with_icon(&gtk::Box::new(gtk::Orientation::Vertical, 0), Some("recording"), "Recording", "audio-input-microphone-symbolic");
+        tabs.set_visible_child_name("recording");
+        let switcher = adw::ViewSwitcher::builder()
+            .stack(&tabs)
+            .policy(adw::ViewSwitcherPolicy::Wide)
+            .build();
+        let header = adw::HeaderBar::new();
+        header.set_title_widget(Some(&switcher));
+        toolbar.add_top_bar(&header);
         let banner = adw::Banner::new("");
         toolbar.add_top_bar(&banner);
         let toasts = adw::ToastOverlay::new();
@@ -417,6 +431,7 @@ impl Ui {
         let ui = Rc::new(Ui {
             window,
             stack,
+            tabs,
             error_page,
             list,
             rebuilding: Cell::new(false),
@@ -453,6 +468,7 @@ impl Ui {
                 rows: Vec::new(),
                 selected: None,
                 selected_sink: None,
+                sound_tab: false,
                 captures: Default::default(),
                 backend: None,
                 activity: ActivityMonitor::default(),
@@ -526,17 +542,6 @@ impl Ui {
                 return;
             }
             let head = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            if prev.map(|p| p.0) != Some(this.0) {
-                head.append(
-                    &gtk::Label::builder()
-                        .label(this.0)
-                        .xalign(0.0)
-                        .margin_top(if prev.is_some() { 20 } else { 8 })
-                        .margin_start(12)
-                        .css_classes(["title-4"])
-                        .build(),
-                );
-            }
             head.append(
                 &gtk::Label::builder()
                     .label(this.1)
@@ -577,6 +582,14 @@ impl Ui {
                 } else if let (Some(b), Some(s)) = (ui.backend(), ui.selected_source()) {
                     b.reset_volume(&s);
                 }
+            }
+        });
+        let w = weak.clone();
+        self.tabs.connect_visible_child_name_notify(move |tabs| {
+            if let Some(ui) = w.upgrade() {
+                ui.state.borrow_mut().sound_tab = tabs.visible_child_name().as_deref() == Some("sound");
+                ui.rebuild_list();
+                ui.sync_selection();
             }
         });
         let w = weak.clone();
@@ -724,9 +737,10 @@ impl Ui {
         let mut rows = Vec::new();
         {
             let st = self.state.borrow();
+            let sound = st.sound_tab;
             // Unmuted first, then muted (stable, so the server order is kept
             // within each group); the list headers split them into categories.
-            let mut sources: Vec<&SourceEntry> = st.model.sources.iter().collect();
+            let mut sources: Vec<&SourceEntry> = st.model.sources.iter().filter(|_| !sound).collect();
             sources.sort_by_key(|s| s.muted);
             for s in sources {
                 let row = adw::ActionRow::builder()
@@ -760,7 +774,7 @@ impl Ui {
                 self.list.append(&row);
                 rows.push(RowKind::Source(s.name.clone(), s.muted));
             }
-            for c in st.model.bluetooth_without_mic() {
+            for c in st.model.bluetooth_without_mic().filter(|_| !sound) {
                 let row = adw::ActionRow::builder()
                     .title(glib::markup_escape_text(&c.description))
                     .subtitle("No microphone in A2DP (music) mode")
@@ -782,10 +796,10 @@ impl Ui {
                 self.list.append(&row);
                 rows.push(RowKind::BluetoothCard);
             }
-            for e in st.disabled.iter().filter(|e| !e.output) {
+            for e in st.disabled.iter().filter(|e| !e.output && !sound) {
                 rows.push(self.append_disabled_row(&st, e));
             }
-            let mut sinks: Vec<_> = st.model.sinks.iter().collect();
+            let mut sinks: Vec<_> = st.model.sinks.iter().filter(|_| sound).collect();
             sinks.sort_by_key(|k| k.muted);
             for k in sinks {
                 let row = adw::ActionRow::builder()
@@ -827,7 +841,7 @@ impl Ui {
                 self.list.append(&row);
                 rows.push(RowKind::Sink(k.name.clone(), k.muted));
             }
-            for e in st.disabled.iter().filter(|e| e.output) {
+            for e in st.disabled.iter().filter(|e| e.output && sound) {
                 rows.push(self.append_disabled_row(&st, e));
             }
         }
@@ -1158,6 +1172,27 @@ impl Ui {
 
     /// Reconcile the selection / capture with the latest model.
     fn sync_selection(self: &Rc<Self>) {
+        // The open tab decides whether an input or an output is shown.
+        {
+            let mut st = self.state.borrow_mut();
+            if st.sound_tab {
+                let valid = st
+                    .selected_sink
+                    .as_ref()
+                    .is_some_and(|n| st.model.sinks.iter().any(|k| &k.name == n));
+                if !valid {
+                    st.selected_sink = st
+                        .model
+                        .sinks
+                        .iter()
+                        .find(|k| k.is_default)
+                        .or(st.model.sinks.first())
+                        .map(|k| k.name.clone());
+                }
+            } else {
+                st.selected_sink = None;
+            }
+        }
         // Pick the default source when nothing is selected, or the selection vanished.
         let (needs_pick, gone) = {
             let st = self.state.borrow();
@@ -1206,12 +1241,20 @@ impl Ui {
             return;
         }
 
+        if self.state.borrow().sound_tab {
+            self.placeholder.set_label("No output devices found.");
+            self.placeholder.set_visible(true);
+            self.analysis.set_visible(false);
+            return;
+        }
         let source = self.selected_source();
         self.placeholder.set_visible(source.is_none());
         self.analysis.set_visible(source.is_some());
-        if gone {
-            self.placeholder.set_label("The selected device was disconnected.");
-        }
+        self.placeholder.set_label(if gone {
+            "The selected device was disconnected."
+        } else {
+            "Select an input device to test it."
+        });
         let Some(source) = source else { return };
 
         self.select_row(|r| matches!(r, RowKind::Source(n, _) if *n == source.name));

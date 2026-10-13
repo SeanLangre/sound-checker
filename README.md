@@ -13,39 +13,39 @@ Open tasks are in [TODO.md](TODO.md).
 
 | Feature                 | Behaviour                                                                 |
 | ----------------------- | ------------------------------------------------------------------------- |
-| Device discovery        | List input sources (monitor sources hidden) and outputs, under "Inputs" and "Outputs" headings |
-| Categories              | Inputs: Unmuted / Muted / "No microphone" (A2DP-only Bluetooth) / Disabled. Outputs: Unmuted / Muted |
+| Tabs                    | "Recording" tab lists inputs, "Sound" tab lists outputs; the right pane follows the open tab |
+| Device discovery        | List input sources (monitor sources hidden) and outputs, one per tab |
+| Categories              | Recording: Unmuted / Muted / "No microphone" (A2DP-only Bluetooth) / Disabled. Sound: Unmuted / Muted / Disabled |
 | Activity colouring      | Unmuted inputs picking up sound turn green and fade out over 3 s; idle ones are dimmed; muted ones are red. Outputs: green while playing, dimmed when idle, red when muted |
 | Hot-plug                | Refresh on Pulse subscribe events (source/card add, remove, change)       |
 | Mute & volume           | Mute button on every input and output (list row and details pane); reset volume to 100% |
 | Default device          | "Set as default" for any input or output (the current one is tagged "default") |
 | Rename                  | "Rename…" gives a device a custom name, shown only in this app (`~/.config/sound-checker/names.json`, keyed by node name); Reset restores the original |
 | Per-channel meters      | Peak and RMS in dBFS for each channel, with peak hold                     |
-| Waveform                | Scrolling waveform of the selected input                                  |
+| Waveform                | Scrolling waveform of the selected input or output                        |
 | Diagnostics             | Silence, clipping, dead/imbalanced channel, disconnect, capture errors    |
 | Noise floor             | Quietest RMS window over the last 10 s                                    |
-| Record & play back      | Record 5 s, play it through the default output                            |
+| Record & play back      | Record 5 s from the selected input or output, play it through the default output |
 | Bluetooth profile hint  | Detect a BT card in A2DP with an available HFP/HSP profile; offer to switch |
-| System-wide disable     | PipeWire only: block one input or output for every app via a WirePlumber `node.disabled` rule (state in `~/.config/sound-checker/disabled.json`); re-enable from the "Disabled" list (under Inputs or Outputs). Restarts WirePlumber (brief audio interruption); the default devices are restored and Bluetooth devices reconnected afterwards. Bluetooth headsets get "Switch to music mode (no mic)" instead, and Bluetooth devices have no disable button. Not hardware-level: direct ALSA access still works |
+| System-wide disable     | PipeWire only: block one input or output for every app via a WirePlumber `node.disabled` rule (state in `~/.config/sound-checker/disabled.json`); re-enable from the "Disabled" list (under Inputs or Outputs). Restarts WirePlumber (brief audio interruption); afterwards the app restores the default devices, moves streams back to the devices they were on, puts cards back on their previous profile and reconnects Bluetooth devices (what it changed is logged to `~/.config/sound-checker/restart.log`). Bluetooth headsets get "Switch to music mode (no mic)" instead, and Bluetooth devices have no disable button. Not hardware-level: direct ALSA access still works |
 | Device details          | Sample rate, format, channel map, driver, card/bus info                   |
-| Live monitoring         | Every unmuted input and every output (via its monitor source) is metered continuously; selecting a device just shows its meters, waveform and recording. Captures don't keep sleeping devices awake |
+| Live monitoring         | Every unmuted input and every output (via its monitor source) is metered continuously; selecting a device just shows its meters, waveform and recording. Captures don't keep sleeping devices awake. Muted inputs show "Muted" and an empty meter (the server mutes before the app can see the signal) |
 
 ## UI sketch
 
 ```
-┌ Linux Sound Checker ─────────────────────────────────────────┐
-│ Inputs                        │ Live analysis                │
-│  Unmuted                      │  L ████████████░░░░  -6.2 dB │
-│ ▌Built-in Microphone  default │  R ███████████░░░░░  -7.0 dB │
-│ ▌USB Headset Microphone    🎤 │  RMS -21.4 dBFS  Noise -62   │
-│  Muted                        │  ~~~~~ waveform ~~~~~        │
-│ ▌Webcam Mic (red)          🔇 │  Status: OK / Clipping / ... │
-│  No microphone                │  [● Record 5s] [▶ Play back] │
-│ BT Headset [Switch to headset]│  [Mute] [Rename…] [Disable…] │
-│ Outputs                       │                              │
-│  Unmuted                      │                              │
-│ ▌Speakers (green: playing) 🔊 │                              │
+┌ Linux Sound Checker ── [ Sound | Recording ] ────────────────┐
+│ Unmuted                       │ Live analysis                │
+│ ▌Built-in Microphone  default │  L ████████████░░░░  -6.2 dB │
+│ ▌USB Headset Microphone    🎤 │  R ███████████░░░░░  -7.0 dB │
+│ Muted                         │  RMS -21.4 dBFS  Noise -62   │
+│ ▌Webcam Mic (red)          🔇 │  ~~~~~ waveform ~~~~~        │
+│ No microphone                 │  Status: OK / Clipping / ... │
+│ BT Headset [Switch to headset]│  [● Record 5s] [▶ Play back] │
+│ Disabled                      │  [Mute] [Rename…] [Disable…] │
+│ ▌Old mic          [Enable]    │                              │
 └───────────────────────────────┴──────────────────────────────┘
+(the Sound tab lists outputs the same way; playing outputs are green)
 ```
 
 ## Design decisions
