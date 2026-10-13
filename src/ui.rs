@@ -46,7 +46,10 @@ struct MeterData {
 struct State {
     model: Model,
     rows: Vec<RowKind>,
+    /// The input shown in the right-hand pane.
     selected: Option<String>,
+    /// The input being captured and metered; changed only by the test button.
+    testing: Option<String>,
     /// What the running capture was started with, to detect spec changes.
     capture_spec: Option<(String, u32, u8)>,
     capture: Option<Capture>,
@@ -92,6 +95,10 @@ struct Ui {
     record_btn: gtk::Button,
     play_btn: gtk::Button,
     record_label: gtk::Label,
+    test_btn: gtk::Button,
+    mute_btn: gtk::Button,
+    /// Meters, stats, waveform, status and recording controls.
+    capture_widgets: Vec<gtk::Widget>,
     sys_row: gtk::Box,
     disable_btn: gtk::Button,
     banner: adw::Banner,
@@ -206,15 +213,37 @@ impl Ui {
         );
         sys_note.add_css_class("dim-label");
         sys_note.set_hexpand(true);
-        let sys_row = gtk::Box::builder().spacing(8).build();
+        let sys_row = gtk::Box::builder().spacing(8).hexpand(true).build();
         sys_row.append(&disable_btn);
         sys_row.append(&sys_note);
         sys_row.set_visible(false);
+        let mute_btn = gtk::Button::with_label("Mute");
+        mute_btn.set_valign(gtk::Align::Start);
+        let actions = gtk::Box::builder().spacing(8).build();
+        actions.append(&mute_btn);
+        actions.append(&sys_row);
 
         let details = label("");
         details.set_selectable(true);
         details.add_css_class("monospace");
         let expander = gtk::Expander::builder().label("Device details").child(&details).build();
+
+        let test_btn = gtk::Button::builder()
+            .label("Test this input")
+            .halign(gtk::Align::Start)
+            .css_classes(["suggested-action", "pill"])
+            .visible(false)
+            .build();
+        let capture_widgets: Vec<gtk::Widget> = [
+            meters.upcast_ref::<gtk::Widget>(),
+            stats.upcast_ref(),
+            wave.upcast_ref(),
+            status.upcast_ref(),
+            rec_row.upcast_ref(),
+        ]
+        .into_iter()
+        .cloned()
+        .collect();
 
         let analysis = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -228,12 +257,13 @@ impl Ui {
         for w in [
             title.upcast_ref::<gtk::Widget>(),
             warn_row.upcast_ref(),
+            test_btn.upcast_ref(),
             meters.upcast_ref(),
             stats.upcast_ref(),
             wave.upcast_ref(),
             status.upcast_ref(),
             rec_row.upcast_ref(),
-            sys_row.upcast_ref(),
+            actions.upcast_ref(),
             expander.upcast_ref(),
         ] {
             analysis.append(w);
@@ -314,6 +344,9 @@ impl Ui {
             record_btn,
             play_btn,
             record_label,
+            test_btn,
+            mute_btn,
+            capture_widgets,
             sys_row,
             disable_btn,
             banner,
@@ -324,6 +357,7 @@ impl Ui {
                 model: Model::default(),
                 rows: Vec::new(),
                 selected: None,
+                testing: None,
                 capture_spec: None,
                 capture: None,
                 backend: None,
@@ -350,6 +384,7 @@ impl Ui {
             let mut st = self.state.borrow_mut();
             st.capture = None;
             st.capture_spec = None;
+            st.testing = None;
             st.backend = None;
             st.activity.clear();
         }
@@ -430,6 +465,24 @@ impl Ui {
             }
         });
         let w = weak.clone();
+        self.mute_btn.connect_clicked(move |_| {
+            if let Some(ui) = w.upgrade() {
+                if let (Some(b), Some(s)) = (ui.backend(), ui.selected_source()) {
+                    b.set_mute(&s.name, !s.muted);
+                }
+            }
+        });
+        let w = weak.clone();
+        self.test_btn.connect_clicked(move |_| {
+            if let Some(ui) = w.upgrade() {
+                {
+                    let mut st = ui.state.borrow_mut();
+                    st.testing = st.selected.clone();
+                }
+                ui.sync_selection();
+            }
+        });
+        let w = weak.clone();
         self.disable_btn.connect_clicked(move |_| {
             if let Some(ui) = w.upgrade() {
                 if let Some(s) = ui.selected_source() {
@@ -494,6 +547,7 @@ impl Ui {
                     let mut st = self.state.borrow_mut();
                     st.capture = None;
                     st.capture_spec = None;
+                    st.testing = None;
                     st.activity.clear();
                 }
                 self.show_error(&msg);
@@ -532,11 +586,25 @@ impl Ui {
                     .subtitle(glib::markup_escape_text(&source_subtitle(s)))
                     .build();
                 row.add_prefix(&gtk::Image::from_icon_name("audio-input-microphone-symbolic"));
-                if s.muted {
-                    let img = gtk::Image::from_icon_name("microphone-sensitivity-muted-symbolic");
-                    img.set_tooltip_text(Some("Muted"));
-                    row.add_suffix(&img);
-                }
+                let (icon, tip) = if s.muted {
+                    ("microphone-sensitivity-muted-symbolic", "Muted — click to unmute")
+                } else {
+                    ("audio-input-microphone-symbolic", "Click to mute")
+                };
+                let mute = gtk::Button::builder()
+                    .icon_name(icon)
+                    .tooltip_text(tip)
+                    .valign(gtk::Align::Center)
+                    .css_classes(["flat", "circular"])
+                    .build();
+                let weak = Rc::downgrade(self);
+                let (name, muted) = (s.name.clone(), s.muted);
+                mute.connect_clicked(move |_| {
+                    if let Some(b) = weak.upgrade().and_then(|ui| ui.backend()) {
+                        b.set_mute(&name, !muted);
+                    }
+                });
+                row.add_suffix(&mute);
                 if s.is_default {
                     let tag = gtk::Label::new(Some("default"));
                     tag.add_css_class("dim-label");
@@ -559,7 +627,7 @@ impl Ui {
                 let card = c.name.clone();
                 btn.connect_clicked(move |_| {
                     if let Some(ui) = weak.upgrade() {
-                        ui.switch_to_headset(&card);
+                        ui.confirm_switch_to_headset(&card);
                     }
                 });
                 row.add_suffix(&btn);
@@ -651,9 +719,10 @@ impl Ui {
         {
             // Release the device before it vanishes.
             let mut st = self.state.borrow_mut();
-            if st.selected.as_deref() == Some(source.name.as_str()) {
+            if st.testing.as_deref() == Some(source.name.as_str()) {
                 st.capture = None;
                 st.capture_spec = None;
+                st.testing = None;
             }
         }
         self.apply(entries, source.node_name.clone(), source.description.clone(), true);
@@ -746,6 +815,38 @@ impl Ui {
         });
     }
 
+    fn confirm_switch_to_headset(self: &Rc<Self>, card_name: &str) {
+        let desc = self
+            .state
+            .borrow()
+            .model
+            .cards
+            .iter()
+            .find(|c| c.name == card_name)
+            .map_or_else(|| card_name.to_string(), |c| c.description.clone());
+        let body = format!(
+            "“{desc}” will switch from music (A2DP) to headset mode so its microphone works. \
+             Playback quality drops while the microphone is available, and audio from it \
+             may cut out briefly."
+        );
+        #[allow(deprecated)]
+        {
+            let dlg = adw::MessageDialog::new(Some(&self.window), Some("Switch to headset mode?"), Some(&body));
+            dlg.add_responses(&[("cancel", "Cancel"), ("switch", "Switch")]);
+            dlg.set_response_appearance("switch", adw::ResponseAppearance::Suggested);
+            dlg.set_default_response(Some("cancel"));
+            dlg.set_close_response("cancel");
+            let weak = Rc::downgrade(self);
+            let card = card_name.to_string();
+            dlg.connect_response(None, move |_, response| {
+                if let (Some(ui), "switch") = (weak.upgrade(), response) {
+                    ui.switch_to_headset(&card);
+                }
+            });
+            dlg.present();
+        }
+    }
+
     fn switch_to_headset(&self, card_name: &str) {
         let (backend, profile) = {
             let st = self.state.borrow();
@@ -783,10 +884,7 @@ impl Ui {
             (!present, st.selected.is_some() && !present)
         };
         if gone {
-            let mut st = self.state.borrow_mut();
-            st.capture = None;
-            st.capture_spec = None;
-            st.selected = None;
+            self.state.borrow_mut().selected = None;
         }
         if needs_pick {
             let pick = {
@@ -799,6 +897,23 @@ impl Ui {
                     .map(|s| s.name.clone())
             };
             self.state.borrow_mut().selected = pick;
+        }
+
+        // The tested input vanished: drop its capture.
+        {
+            let mut st = self.state.borrow_mut();
+            let present = st
+                .testing
+                .as_ref()
+                .is_some_and(|n| st.model.sources.iter().any(|s| &s.name == n));
+            if !present {
+                st.testing = None;
+                st.capture = None;
+                st.capture_spec = None;
+            }
+            if st.testing.is_none() {
+                st.testing = st.selected.clone();
+            }
         }
 
         let source = self.selected_source();
@@ -825,11 +940,25 @@ impl Ui {
         self.update_source_info(&source);
         self.sys_row.set_visible(self.state.borrow().model.is_pipewire());
 
-        // (Re)start capture when the device or its format changed.
-        let spec = (source.name.clone(), source.rate, source.channels);
-        let restart = self.state.borrow().capture_spec.as_ref() != Some(&spec);
-        if restart {
-            self.start_capture(&source);
+        // The meters belong to the tested input; for any other one offer a button.
+        let viewing_other = self.state.borrow().testing.as_deref() != Some(source.name.as_str());
+        for w in &self.capture_widgets {
+            w.set_visible(!viewing_other);
+        }
+        self.test_btn.set_visible(viewing_other);
+
+        // (Re)start capture when the tested device or its format changed.
+        let testing = {
+            let st = self.state.borrow();
+            let name = st.testing.clone();
+            name.and_then(|n| st.model.sources.iter().find(|s| s.name == n).cloned())
+        };
+        if let Some(t) = testing {
+            let spec = (t.name.clone(), t.rate, t.channels);
+            let restart = self.state.borrow().capture_spec.as_ref() != Some(&spec);
+            if restart {
+                self.start_capture(&t);
+            }
         }
     }
 
@@ -875,6 +1004,7 @@ impl Ui {
             problems.push(format!("Input volume is {}%.", s.volume_pct));
         }
         self.warn_label.set_text(&problems.join(" "));
+        self.mute_btn.set_label(if s.muted { "Unmute" } else { "Mute" });
         self.unmute_btn.set_visible(s.muted);
         self.volume_btn.set_visible(s.volume_pct != 100);
         self.warn_row.set_visible(s.muted || s.volume_pct != 100);
