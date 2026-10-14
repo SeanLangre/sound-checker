@@ -1,3 +1,5 @@
 /target
 /.flatpak-builder
 /build-dir
+/Sound-Checker-*.AppImage
+/build-appimage
