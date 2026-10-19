@@ -9,28 +9,6 @@ Open tasks are in [TODO.md](TODO.md).
 
 ![Linux Sound Checker showing the device list and live analysis](docs/screenshot.png)
 
-## Features
-
-| Feature                 | Behaviour                                                                 |
-| ----------------------- | ------------------------------------------------------------------------- |
-| Tabs                    | "Recording" tab lists inputs, "Sound" tab lists outputs; the right pane follows the open tab |
-| Device discovery        | List input sources (monitor sources hidden) and outputs, one per tab |
-| Categories              | Recording: Unmuted / Muted / "No microphone" (A2DP-only Bluetooth) / Disabled. Sound: Unmuted / Muted / Disabled |
-| Activity colouring      | Unmuted inputs picking up sound turn green (no fade); idle ones are dimmed; muted ones are red. Outputs: green while playing, dimmed when idle, red when muted |
-| Hot-plug                | Refresh on Pulse subscribe events (source/card add, remove, change)       |
-| Mute & volume           | Mute button on every input and output (list row and details pane); reset volume to 100% |
-| Default device          | "Set as default" for any input or output (the current one is tagged "default") |
-| Rename                  | "Rename…" gives a device a custom name, shown only in this app (`~/.config/sound-checker/names.json`, keyed by node name); Reset restores the original |
-| Per-channel meters      | Peak and RMS in dBFS for each channel, with peak hold                     |
-| Waveform                | Scrolling waveform of the selected input or output                        |
-| Diagnostics             | Silence, clipping, dead/imbalanced channel, disconnect, capture errors    |
-| Noise floor             | Quietest RMS window over the last 10 s                                    |
-| Record & play back      | Record 5 s from the selected input or output, play it through the default output |
-| Bluetooth profile hint  | Detect a BT card in A2DP with an available HFP/HSP profile; offer to switch |
-| System-wide disable     | PipeWire only: block one input or output for every app via a WirePlumber `node.disabled` rule (state in `~/.config/sound-checker/disabled.json`); re-enable from the "Disabled" list (under Inputs or Outputs). Restarts WirePlumber (brief audio interruption); afterwards the app restores the default devices, moves streams back to the devices they were on, puts cards back on their previous profile and reconnects Bluetooth devices (what it changed is logged to `~/.config/sound-checker/restart.log`). Bluetooth headsets get "Switch to music mode (no mic)" instead, and Bluetooth devices have no disable button. Not hardware-level: direct ALSA access still works |
-| Device details          | Sample rate, format, channel map, driver, card/bus info                   |
-| Live monitoring         | Every unmuted input and every output (via its monitor source) is metered continuously; selecting a device just shows its meters, waveform and recording. Captures don't keep sleeping devices awake. Muted inputs show "Muted" and an empty meter (the server mutes before the app can see the signal) |
-
 ## Design decisions
 
 | Topic        | Choice                                                                 |
@@ -70,20 +48,47 @@ locking (no ring buffer needed).
 
 ## Notes and limitations
 
-- Activity colouring opens a capture stream on every unmuted input, which wakes
-  suspended devices (a webcam LED may light up while the app is open).
 - Muted inputs are not monitored: the audio server silences them before any
   client can see the signal, so they always show red.
-- Row colours are CSS classes (`src-active`, `src-idle`, `src-muted`); colour changes
-  are instant, with no CSS transitions.
+
+## Prerequisites
+
+At runtime the app needs a running PipeWire (with `pipewire-pulse`) or
+PulseAudio server, GTK ≥ 4.10 and libadwaita ≥ 1.4.
+
+Build packages:
+
+| Distro | Packages |
+| ------ | -------- |
+| Arch   | `sudo pacman -S --needed base-devel rust gtk4 libadwaita libpulse pkgconf` |
+| Fedora | `sudo dnf install gcc rust cargo gtk4-devel libadwaita-devel pulseaudio-libs-devel pkgconf-pkg-config` |
+
+Optional tools, called by some features (the app runs without them; only that
+feature fails):
+
+| Tool           | Used for                                              | Arch          | Fedora              |
+| -------------- | ----------------------------------------------------- | ------------- | ------------------- |
+| `wireplumber`  | System-wide disable (PipeWire only)                   | `wireplumber` | `wireplumber`       |
+| `systemctl`    | Restarting WirePlumber after a disable/enable         | `systemd`     | `systemd`           |
+| `pactl`        | Restoring defaults and streams after that restart     | `libpulse`    | `pulseaudio-utils`  |
+| `bluetoothctl` | Reconnecting Bluetooth devices after that restart     | `bluez-utils` | `bluez`             |
 
 ## Build
 
     cargo run --release
     cargo test
 
-Dependencies — Arch: `rust gtk4 libadwaita libpulse pkgconf`;
-Fedora: `rust cargo gtk4-devel libadwaita-devel pulseaudio-libs-devel pkgconf`.
+## AppImage
+
+    packaging/build-appimage.sh
+
+Writes `Sound-Checker-x86_64.AppImage` to the repo root, bundling the GTK4 and
+libadwaita libraries from the build host. Needs the build packages above plus
+`appimagetool` (Arch: AUR `appimagetool-bin`; Fedora: download from
+[AppImage/appimagetool](https://github.com/AppImage/appimagetool/releases))
+and `glib-compile-schemas` (from `glib2`, pulled in by GTK). Running the
+AppImage needs FUSE (`fuse3`; older AppImage runtimes want `fuse2` on Arch /
+`fuse-libs` on Fedora), or run it with `--appimage-extract-and-run`.
 
 ## Flatpak
 
