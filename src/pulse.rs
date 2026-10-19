@@ -403,7 +403,8 @@ fn source_entry(info: &SourceInfo) -> SourceEntry {
         card: info.card,
         bus: prop("device.bus"),
         form_factor: prop("device.form_factor"),
-        state: format!("{:?}", info.state),
+        // Read the raw value: pipewire-pulse can report states the binding's enum lacks.
+        state: state_name(unsafe { std::mem::transmute::<_, i32>(info.state) }),
         is_default: false,
     }
 }
@@ -432,7 +433,7 @@ fn sink_entry(info: &SinkInfo) -> SinkEntry {
         card: info.card,
         bus: prop("device.bus"),
         form_factor: prop("device.form_factor"),
-        state: format!("{:?}", info.state),
+        state: state_name(unsafe { std::mem::transmute::<_, i32>(info.state) }),
         is_default: false,
     }
 }
@@ -461,6 +462,21 @@ fn card_entry(info: &CardInfo) -> CardEntry {
                 available: p.available,
             })
             .collect(),
+    }
+}
+
+/// Names a sink/source state. Beyond the four public values, pipewire-pulse may
+/// send internal ones: -2 (init) for a node still being created, -3 (unlinked)
+/// for a node in the error state.
+fn state_name(raw: i32) -> String {
+    match raw {
+        0 => "Running".into(),
+        1 => "Idle".into(),
+        2 => "Suspended".into(),
+        -1 => "Invalid".into(),
+        -2 => "Init".into(),
+        -3 => "Unlinked".into(),
+        other => format!("Unknown({other})"),
     }
 }
 
