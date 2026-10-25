@@ -185,6 +185,16 @@ impl Backend {
         Ok(backend)
     }
 
+    /// Drop the server connection now instead of whenever the last `Rc` goes.
+    pub fn shutdown(&self) {
+        self.dead.set(true);
+        if let Ok(mut ctx) = self.ctx.try_borrow_mut() {
+            ctx.set_state_callback(None);
+            ctx.set_subscribe_callback(None);
+            ctx.disconnect();
+        }
+    }
+
     fn on_state_change(self: &Rc<Self>) {
         let state = self.ctx.borrow().get_state();
         match state {

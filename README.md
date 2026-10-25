@@ -80,15 +80,31 @@ feature fails):
 
 ## AppImage
 
-    packaging/build-appimage.sh
+To build and run it:
 
-Writes `Sound-Checker-x86_64.AppImage` to the repo root, bundling the GTK4 and
-libadwaita libraries from the build host. Needs the build packages above plus
-`appimagetool` (Arch: AUR `appimagetool-bin`; Fedora: download from
-[AppImage/appimagetool](https://github.com/AppImage/appimagetool/releases))
-and `glib-compile-schemas` (from `glib2`, pulled in by GTK). Running the
-AppImage needs FUSE (`fuse3`; older AppImage runtimes want `fuse2` on Arch /
-`fuse-libs` on Fedora), or run it with `--appimage-extract-and-run`.
+1. Install the build packages from [Prerequisites](#prerequisites).
+2. Install `appimagetool` (Arch: AUR `appimagetool-bin`; Fedora: download from
+   [AppImage/appimagetool](https://github.com/AppImage/appimagetool/releases)
+   and put it on your `PATH`). `glib-compile-schemas` (from `glib2`) is also
+   needed; GTK normally pulls it in.
+3. From the repo root:
+
+       packaging/build-appimage.sh
+
+4. Run the result:
+
+       ./Sound-Checker-x86_64.AppImage
+
+The script does a `cargo build --release --locked`, assembles
+`build-appimage/AppDir` (binary, the GTK4/libadwaita libraries copied from the
+build host, GDK-Pixbuf/GIO modules, GSettings schemas, icon themes, desktop
+entry and icon) and writes `Sound-Checker-x86_64.AppImage` to the repo root.
+Build on the oldest distro you want to support, since the bundle uses the host's
+libraries but relies on the target's glibc and GPU drivers.
+
+Running the AppImage needs FUSE (`fuse3`; older AppImage runtimes want `fuse2`
+on Arch / `fuse-libs` on Fedora), or run it with `--appimage-extract-and-run`.
+Launching it a second time raises the running window instead of opening another.
 
 ## Flatpak
 

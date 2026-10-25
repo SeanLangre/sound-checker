@@ -228,10 +228,24 @@ fn load_css() {
 }
 
 pub fn build(app: &adw::Application) {
+    // Single instance: a repeat activation just raises the existing window.
+    if let Some(window) = app.active_window().or_else(|| app.windows().into_iter().next()) {
+        window.present();
+        return;
+    }
     load_css();
     let ui = Ui::new(app);
     ui.connect();
     ui.window.present();
+    // Release every audio stream and the server connection when the window
+    // closes, so nothing outlives the app.
+    let closing = Rc::downgrade(&ui);
+    ui.window.connect_close_request(move |_| {
+        if let Some(ui) = closing.upgrade() {
+            ui.shutdown();
+        }
+        gtk::glib::Propagation::Proceed
+    });
     // Every callback holds only a weak reference, so give the window the one
     // strong one; it is released when the window is destroyed.
     let keep_alive = Rc::clone(&ui);
@@ -492,6 +506,23 @@ impl Ui {
             }
         });
         ui
+    }
+
+    /// Stop all captures and monitors and close the audio server connection.
+    fn shutdown(&self) {
+        let (captures, activity, backend) = {
+            let mut st = self.state.borrow_mut();
+            (
+                std::mem::take(&mut st.captures),
+                std::mem::take(&mut st.activity),
+                st.backend.take(),
+            )
+        };
+        drop(captures);
+        drop(activity);
+        if let Some(b) = backend {
+            b.shutdown();
+        }
     }
 
     /// (Re)connect to the audio server and wire up all handlers.
