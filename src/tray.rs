@@ -9,6 +9,7 @@ use ksni::blocking::TrayMethods;
 
 pub enum Command {
     Show,
+    ScanBluetooth,
     Quit,
 }
 
@@ -34,6 +35,14 @@ impl ksni::Tray for Tray {
                 label: "Show Sound Checker".into(),
                 activate: Box::new(|t: &mut Self| {
                     let _ = t.0.send(Command::Show);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Scan for Bluetooth devices".into(),
+                activate: Box::new(|t: &mut Self| {
+                    let _ = t.0.send(Command::ScanBluetooth);
                 }),
                 ..Default::default()
             }

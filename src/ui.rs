@@ -261,6 +261,7 @@ pub fn build(app: &adw::Application, background: bool) {
             while let Ok(cmd) = rx.try_recv() {
                 match (cmd, weak.upgrade()) {
                     (crate::tray::Command::Show, Some(ui)) => ui.show(),
+                    (crate::tray::Command::ScanBluetooth, _) => crate::reconnect::start_scan(),
                     (crate::tray::Command::Quit, ui) => {
                         if let Some(ui) = ui {
                             ui.shutdown();
@@ -312,10 +313,30 @@ fn autostart_menu() -> gtk::MenuButton {
         }
         gtk::glib::Propagation::Proceed
     });
+    let scan = gtk::Button::with_label("Scan for Bluetooth devices");
+    scan.set_tooltip_text(Some("Try to connect remembered Bluetooth audio devices (retries for about 80 seconds)"));
+    scan.connect_clicked(|b| {
+        crate::reconnect::start_scan();
+        b.set_sensitive(false);
+        b.set_label("Scanning…");
+        let b = b.clone();
+        gtk::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+            if crate::reconnect::scanning() {
+                gtk::glib::ControlFlow::Continue
+            } else {
+                b.set_label("Scan for Bluetooth devices");
+                b.set_sensitive(true);
+                gtk::glib::ControlFlow::Break
+            }
+        });
+    });
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    content.append(&row);
+    content.append(&scan);
     gtk::MenuButton::builder()
         .icon_name("open-menu-symbolic")
         .tooltip_text("Settings")
-        .popover(&gtk::Popover::builder().child(&row).build())
+        .popover(&gtk::Popover::builder().child(&content).build())
         .build()
 }
 

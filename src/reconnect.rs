@@ -10,6 +10,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -115,8 +116,25 @@ fn seed() -> Vec<Known> {
         .collect()
 }
 
+static SCANNING: AtomicBool = AtomicBool::new(false);
+
+/// Whether a scan is in progress.
+pub fn scanning() -> bool {
+    SCANNING.load(Ordering::SeqCst)
+}
+
+/// Run a scan on a background thread unless one is already running.
+pub fn start_scan() {
+    if !SCANNING.swap(true, Ordering::SeqCst) {
+        std::thread::spawn(|| {
+            run();
+            SCANNING.store(false, Ordering::SeqCst);
+        });
+    }
+}
+
 /// Connect remembered devices that are not connected. Blocking.
-/// Retries for about two minutes: the adapter may still be powering up, and
+/// Retries for about 80 seconds: the adapter may still be powering up, and
 /// headphones that are off simply refuse until they are switched on.
 pub fn run() {
     let list = load().unwrap_or_else(|| {
@@ -125,7 +143,7 @@ pub fn run() {
         s
     });
     let mut pending: Vec<Known> = list;
-    for attempt in 0..12 {
+    for attempt in 0..8 {
         pending.retain(|d| !is_connected(&d.mac));
         if pending.is_empty() {
             return;

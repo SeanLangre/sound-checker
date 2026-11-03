@@ -19,7 +19,7 @@ fn main() -> gtk::glib::ExitCode {
     // a window and reconnect remembered Bluetooth audio devices.
     let background = std::env::args().any(|a| a == "--background");
     if background {
-        std::thread::spawn(reconnect::run);
+        reconnect::start_scan();
     }
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(move |app| ui::build(app, background));
