@@ -22,10 +22,11 @@ install -m755 target/release/sound-checker "$APPDIR/usr/bin/sound-checker"
 
 # Bundle shared libraries (transitively).
 bundle_libs() {
-    ldd "$@" 2>/dev/null | awk '/=> \//{print $3}' | while read -r lib; do
+    { ldd "$@" 2>/dev/null || true; } | awk '/=> \//{print $3}' | while read -r lib; do
         name="$(basename "$lib")"
-        [[ "$name" =~ $EXCLUDE ]] && continue
-        [[ -e "$LIBDIR/$name" ]] || cp -L "$lib" "$LIBDIR/$name"
+        if [[ ! "$name" =~ $EXCLUDE && ! -e "$LIBDIR/$name" ]]; then
+            cp -L "$lib" "$LIBDIR/$name"
+        fi
     done
 }
 bundle_libs "$APPDIR/usr/bin/sound-checker"

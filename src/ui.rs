@@ -161,6 +161,8 @@ struct Ui {
     error_page: adw::StatusPage,
     list: gtk::ListBox,
     rebuilding: Cell<bool>,
+    /// Window hidden to the tray; audio streams are released meanwhile.
+    hidden: Cell<bool>,
 
     // Right-hand pane.
     placeholder: gtk::Label,
@@ -227,31 +229,90 @@ fn load_css() {
     }
 }
 
-pub fn build(app: &adw::Application) {
+thread_local! {
+    static UI: RefCell<Option<Rc<Ui>>> = const { RefCell::new(None) };
+}
+
+pub fn build(app: &adw::Application, background: bool) {
     // Single instance: a repeat activation just raises the existing window.
-    if let Some(window) = app.active_window().or_else(|| app.windows().into_iter().next()) {
-        window.present();
+    if let Some(ui) = UI.with(|u| u.borrow().clone()) {
+        ui.show();
         return;
     }
     load_css();
     let ui = Ui::new(app);
-    ui.connect();
-    ui.window.present();
-    // Release every audio stream and the server connection when the window
-    // closes, so nothing outlives the app.
+    UI.with(|u| *u.borrow_mut() = Some(Rc::clone(&ui)));
+    // Keep the app running while the window is hidden in the tray.
+    let _hold = app.hold();
+    std::mem::forget(_hold);
+
+    let tray = crate::tray::start();
+    let has_tray = tray.is_some();
+    if let Some((handle, rx)) = tray {
+        let app = app.clone();
+        let weak = Rc::downgrade(&ui);
+        let _keep = handle; // dropping the handle would remove the icon
+        std::mem::forget(_keep);
+        gtk::glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+            while let Ok(cmd) = rx.try_recv() {
+                match (cmd, weak.upgrade()) {
+                    (crate::tray::Command::Show, Some(ui)) => ui.show(),
+                    (crate::tray::Command::Quit, ui) => {
+                        if let Some(ui) = ui {
+                            ui.shutdown();
+                        }
+                        app.quit();
+                    }
+                    _ => {}
+                }
+            }
+            gtk::glib::ControlFlow::Continue
+        });
+    }
+
+    if background && has_tray {
+        ui.hidden.set(true); // connects on first show
+    } else {
+        ui.connect();
+        ui.window.present();
+    }
+
+    // Closing hides to the tray when there is one; otherwise it quits.
+    // Either way every audio stream and the server connection are released.
     let closing = Rc::downgrade(&ui);
-    ui.window.connect_close_request(move |_| {
+    ui.window.connect_close_request(move |w| {
         if let Some(ui) = closing.upgrade() {
             ui.shutdown();
+            if has_tray {
+                ui.hidden.set(true);
+                w.set_visible(false);
+                return gtk::glib::Propagation::Stop;
+            }
         }
         gtk::glib::Propagation::Proceed
     });
-    // Every callback holds only a weak reference, so give the window the one
-    // strong one; it is released when the window is destroyed.
-    let keep_alive = Rc::clone(&ui);
-    ui.window.connect_destroy(move |_| {
-        let _ = &keep_alive;
+}
+
+/// Header-bar settings menu with the start-at-login switch.
+fn autostart_menu() -> gtk::MenuButton {
+    let row = gtk::Box::builder().spacing(12).margin_top(8).margin_bottom(8).margin_start(8).margin_end(8).build();
+    let text = gtk::Label::builder().label("Start at login").hexpand(true).xalign(0.0).build();
+    let switch = gtk::Switch::builder().active(crate::autostart::is_enabled()).valign(gtk::Align::Center).build();
+    row.append(&text);
+    row.append(&switch);
+    switch.connect_state_set(|sw, on| {
+        if let Err(e) = crate::autostart::set_enabled(on) {
+            eprintln!("autostart: {e}");
+            sw.set_active(!on);
+            return gtk::glib::Propagation::Stop;
+        }
+        gtk::glib::Propagation::Proceed
     });
+    gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .tooltip_text("Settings")
+        .popover(&gtk::Popover::builder().child(&row).build())
+        .build()
 }
 
 fn label(text: &str) -> gtk::Label {
@@ -425,13 +486,14 @@ impl Ui {
         let tabs = adw::ViewStack::new();
         tabs.add_titled_with_icon(&gtk::Box::new(gtk::Orientation::Vertical, 0), Some("sound"), "Sound", "audio-speakers-symbolic");
         tabs.add_titled_with_icon(&gtk::Box::new(gtk::Orientation::Vertical, 0), Some("recording"), "Recording", "audio-input-microphone-symbolic");
-        tabs.set_visible_child_name("recording");
+        tabs.set_visible_child_name("sound");
         let switcher = adw::ViewSwitcher::builder()
             .stack(&tabs)
             .policy(adw::ViewSwitcherPolicy::Wide)
             .build();
         let header = adw::HeaderBar::new();
         header.set_title_widget(Some(&switcher));
+        header.pack_end(&autostart_menu());
         toolbar.add_top_bar(&header);
         let banner = adw::Banner::new("");
         toolbar.add_top_bar(&banner);
@@ -454,6 +516,7 @@ impl Ui {
             error_page,
             list,
             rebuilding: Cell::new(false),
+            hidden: Cell::new(false),
             placeholder,
             analysis,
             title,
@@ -487,7 +550,7 @@ impl Ui {
                 rows: Vec::new(),
                 selected: None,
                 selected_sink: None,
-                sound_tab: false,
+                sound_tab: true,
                 captures: Default::default(),
                 backend: None,
                 activity: ActivityMonitor::default(),
@@ -506,6 +569,14 @@ impl Ui {
             }
         });
         ui
+    }
+
+    /// Raise the window, reconnecting to the audio server if it was hidden.
+    fn show(self: &Rc<Self>) {
+        if self.hidden.replace(false) {
+            self.connect();
+        }
+        self.window.present();
     }
 
     /// Stop all captures and monitors and close the audio server connection.
@@ -742,6 +813,18 @@ impl Ui {
                 {
                     let mut st = self.state.borrow_mut();
                     st.model = model;
+                    let seen: Vec<_> = st
+                        .model
+                        .cards
+                        .iter()
+                        .filter_map(|c| {
+                            Some(crate::reconnect::Known {
+                                mac: crate::reconnect::mac_from_card_name(&c.name)?,
+                                name: c.description.clone(),
+                            })
+                        })
+                        .collect();
+                    crate::reconnect::remember(&seen);
                     let State { model, names, .. } = &mut *st;
                     for src in &mut model.sources {
                         if let Some(n) = names.get(&src.node_name) {
