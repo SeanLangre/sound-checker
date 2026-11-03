@@ -9,6 +9,7 @@ use gtk::glib;
 use crate::activity::ActivityMonitor;
 use crate::analysis::{ChannelLevel, Status, FLOOR_DB};
 use crate::names::{self, Names};
+use crate::priority::{self, Priorities};
 use crate::capture::{Capture, CaptureState, RecordState};
 use crate::pulse::{Backend, CardEntry, Event, Model, SinkEntry, SourceEntry};
 use crate::wireplumber::{self, DisabledEntry};
@@ -71,6 +72,7 @@ struct State {
     backend: Option<Rc<Backend>>,
     activity: ActivityMonitor,
     names: Names,
+    priorities: Priorities,
     disabled: Vec<DisabledEntry>,
     can_restart: bool,
     pending: Option<Pending>,
@@ -183,6 +185,8 @@ struct Ui {
     mute_btn: gtk::Button,
     rename_btn: gtk::Button,
     default_btn: gtk::Button,
+    up_btn: gtk::Button,
+    down_btn: gtk::Button,
     music_btn: gtk::Button,
     /// Meters, stats, waveform, status and recording controls.
     capture_widgets: Vec<gtk::Widget>,
@@ -397,9 +401,21 @@ impl Ui {
         default_btn.set_valign(gtk::Align::Start);
         let mute_btn = gtk::Button::with_label("Mute");
         mute_btn.set_valign(gtk::Align::Start);
+        let up_btn = gtk::Button::builder()
+            .icon_name("go-up-symbolic")
+            .tooltip_text("Raise priority: the highest-priority device present becomes the default when devices change")
+            .valign(gtk::Align::Start)
+            .build();
+        let down_btn = gtk::Button::builder()
+            .icon_name("go-down-symbolic")
+            .tooltip_text("Lower priority")
+            .valign(gtk::Align::Start)
+            .build();
         let actions = gtk::Box::builder().spacing(8).build();
         actions.append(&mute_btn);
         actions.append(&default_btn);
+        actions.append(&up_btn);
+        actions.append(&down_btn);
         actions.append(&rename_btn);
         actions.append(&sys_row);
         actions.append(&music_btn);
@@ -535,6 +551,8 @@ impl Ui {
             mute_btn,
             rename_btn,
             default_btn,
+            up_btn,
+            down_btn,
             music_btn,
             capture_widgets,
             sys_row,
@@ -555,6 +573,7 @@ impl Ui {
                 backend: None,
                 activity: ActivityMonitor::default(),
                 names: names::load(),
+                priorities: priority::load(),
                 disabled: wireplumber::load(),
                 can_restart: wireplumber::can_restart(),
                 pending: None,
@@ -725,6 +744,14 @@ impl Ui {
                 }
             }
         });
+        for (btn, up) in [(&self.up_btn, true), (&self.down_btn, false)] {
+            let w = weak.clone();
+            btn.connect_clicked(move |_| {
+                if let Some(ui) = w.upgrade() {
+                    ui.shift_priority(up);
+                }
+            });
+        }
         let w = weak.clone();
         self.music_btn.connect_clicked(move |_| {
             if let Some(ui) = w.upgrade() {
@@ -815,6 +842,16 @@ impl Ui {
                 self.show_error(&msg);
             }
             Event::Update(model) => {
+                let devices_changed = {
+                    let st = self.state.borrow();
+                    let old = |m: &Model| -> (Vec<String>, Vec<String>) {
+                        (
+                            m.sources.iter().map(|s| s.name.clone()).collect(),
+                            m.sinks.iter().map(|k| k.name.clone()).collect(),
+                        )
+                    };
+                    old(&st.model) != old(&model)
+                };
                 {
                     let mut st = self.state.borrow_mut();
                     st.model = model;
@@ -846,11 +883,80 @@ impl Ui {
                         activity.sync(&b.ctx, &model.sources);
                     }
                 }
+                if devices_changed {
+                    self.apply_priorities();
+                }
                 self.check_pending();
                 self.rebuild_list();
                 self.sync_selection();
             }
         }
+    }
+
+    /// Make the highest-priority unmuted device that is present the default.
+    /// Runs when devices appear or disappear, so a manual "Set as default"
+    /// holds until the next hot-plug.
+    fn apply_priorities(&self) {
+        let (src, sink, backend) = {
+            let st = self.state.borrow();
+            let src = priority::best(
+                &st.priorities.inputs,
+                st.model.sources.iter().filter(|s| !s.muted).map(|s| s.name.as_str()),
+            )
+            .filter(|n| !st.model.sources.iter().any(|s| s.is_default && s.name == *n))
+            .map(str::to_string);
+            let sink = priority::best(
+                &st.priorities.outputs,
+                st.model.sinks.iter().filter(|k| !k.muted).map(|k| k.name.as_str()),
+            )
+            .filter(|n| !st.model.sinks.iter().any(|k| k.is_default && k.name == *n))
+            .map(str::to_string);
+            (src, sink, st.backend.clone())
+        };
+        let Some(b) = backend else { return };
+        if let Some(n) = src {
+            b.set_default_source(&n);
+        }
+        if let Some(n) = sink {
+            b.set_default_sink(&n);
+        }
+    }
+
+    /// Move the selected device up or down in its priority list.
+    fn shift_priority(self: &Rc<Self>, up: bool) {
+        {
+            let mut st = self.state.borrow_mut();
+            let (output, name, mut visible): (bool, String, Vec<(bool, usize, String)>) =
+                if let Some(k) = st.selected_sink.clone() {
+                    let v = st
+                        .model
+                        .sinks
+                        .iter()
+                        .map(|k| (k.muted, priority::rank(&st.priorities.outputs, &k.name), k.name.clone()))
+                        .collect();
+                    (true, k, v)
+                } else if let Some(s) = st.selected.clone() {
+                    let v = st
+                        .model
+                        .sources
+                        .iter()
+                        .map(|s| (s.muted, priority::rank(&st.priorities.inputs, &s.name), s.name.clone()))
+                        .collect();
+                    (false, s, v)
+                } else {
+                    return;
+                };
+            // Same order the list displays.
+            visible.sort();
+            let visible: Vec<String> = visible.into_iter().map(|(_, _, n)| n).collect();
+            priority::shift(st.priorities.list_mut(output), &visible, &name, up);
+            if let Err(e) = priority::save(&st.priorities) {
+                eprintln!("could not save priorities: {e}");
+            }
+        }
+        self.apply_priorities();
+        self.rebuild_list();
+        self.sync_selection();
     }
 
     fn rebuild_list(self: &Rc<Self>) {
@@ -865,7 +971,7 @@ impl Ui {
             // Unmuted first, then muted (stable, so the server order is kept
             // within each group); the list headers split them into categories.
             let mut sources: Vec<&SourceEntry> = st.model.sources.iter().filter(|_| !sound).collect();
-            sources.sort_by_key(|s| s.muted);
+            sources.sort_by_key(|s| (s.muted, priority::rank(&st.priorities.inputs, &s.name)));
             for s in sources {
                 let row = adw::ActionRow::builder()
                     .title(glib::markup_escape_text(&s.description))
@@ -924,7 +1030,7 @@ impl Ui {
                 rows.push(self.append_disabled_row(&st, e));
             }
             let mut sinks: Vec<_> = st.model.sinks.iter().filter(|_| sound).collect();
-            sinks.sort_by_key(|k| k.muted);
+            sinks.sort_by_key(|k| (k.muted, priority::rank(&st.priorities.outputs, &k.name)));
             for k in sinks {
                 let row = adw::ActionRow::builder()
                     .title(glib::markup_escape_text(&k.description))
@@ -1396,6 +1502,8 @@ impl Ui {
         }
 
         self.default_btn.set_visible(!source.is_default);
+        self.up_btn.set_visible(true);
+        self.down_btn.set_visible(true);
     }
 
     /// Reflect the selection in the list without re-triggering.
@@ -1434,6 +1542,8 @@ impl Ui {
         self.sys_row.set_visible(!is_bt && self.state.borrow().model.is_pipewire());
         self.music_btn.set_visible(false);
         self.default_btn.set_visible(!k.is_default);
+        self.up_btn.set_visible(true);
+        self.down_btn.set_visible(true);
 
         let st = self.state.borrow();
         let card = k

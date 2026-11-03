@@ -3,6 +3,7 @@ mod autostart;
 mod analysis;
 mod capture;
 mod names;
+mod priority;
 mod pulse;
 mod reconnect;
 mod tray;
