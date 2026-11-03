@@ -14,7 +14,9 @@ use libpulse_binding::stream::{FlagSet, PeekResult, State, Stream};
 use crate::analysis::Analyzer;
 use crate::pulse::{capture_spec, SourceEntry};
 
-pub const RECORD_SECS: u32 = 5;
+/// Safety cap: a recording that is never stopped ends here (about 22 MB per
+/// minute at 48 kHz stereo).
+pub const MAX_RECORD_SECS: u32 = 120;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CaptureState {
@@ -45,6 +47,15 @@ pub struct Shared {
 impl Shared {
     pub fn has_recording(&self) -> bool {
         !self.recorded.is_empty()
+    }
+
+    pub fn rate(&self) -> u32 {
+        self.rate
+    }
+
+    /// Length of the last recording in seconds.
+    pub fn recorded_secs(&self) -> f32 {
+        self.recorded.len() as f32 / (self.rate as usize * self.channels).max(1) as f32
     }
 }
 
@@ -137,7 +148,8 @@ impl Capture {
         })
     }
 
-    /// Begin a fixed-length recording from the running stream.
+    /// Begin recording from the running stream; ends at `stop_recording` or
+    /// the `MAX_RECORD_SECS` cap.
     pub fn start_recording(&self) {
         let mut sh = self.shared.borrow_mut();
         if sh.state != CaptureState::Running {
@@ -145,8 +157,16 @@ impl Capture {
         }
         self.stop_playback_inner(&mut sh);
         sh.recorded.clear();
-        let target = (sh.rate * RECORD_SECS) as usize;
+        let target = (sh.rate * MAX_RECORD_SECS) as usize;
         sh.record = RecordState::Recording { frames: 0, target };
+    }
+
+    /// End a running recording and keep what was captured so far.
+    pub fn stop_recording(&self) {
+        let mut sh = self.shared.borrow_mut();
+        if matches!(sh.record, RecordState::Recording { .. }) {
+            sh.record = if sh.recorded.is_empty() { RecordState::Idle } else { RecordState::Recorded };
+        }
     }
 
     /// Play the last recording through the default output.

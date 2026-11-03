@@ -9,7 +9,7 @@ use gtk::glib;
 use crate::activity::ActivityMonitor;
 use crate::analysis::{ChannelLevel, Status, FLOOR_DB};
 use crate::names::{self, Names};
-use crate::capture::{Capture, CaptureState, RecordState, RECORD_SECS};
+use crate::capture::{Capture, CaptureState, RecordState};
 use crate::pulse::{Backend, CardEntry, Event, Model, SinkEntry, SourceEntry};
 use crate::wireplumber::{self, DisabledEntry};
 
@@ -367,7 +367,7 @@ impl Ui {
         status.set_height_request(44);
         status.set_yalign(0.0);
 
-        let record_btn = gtk::Button::with_label(&format!("● Record {RECORD_SECS} s"));
+        let record_btn = gtk::Button::with_label("● Record");
         let play_btn = gtk::Button::with_label("▶ Play back");
         play_btn.set_sensitive(false);
         let record_label = label("");
@@ -746,7 +746,12 @@ impl Ui {
             if let Some(ui) = w.upgrade() {
                 let st = ui.state.borrow();
                 if let Some(c) = st.viewed_capture() {
-                    c.start_recording();
+                    let recording = matches!(c.shared.borrow().record, RecordState::Recording { .. });
+                    if recording {
+                        c.stop_recording();
+                    } else {
+                        c.start_recording();
+                    }
                 }
             }
         });
@@ -1652,14 +1657,14 @@ impl Ui {
         // Record / playback controls.
         let running = sh.state == CaptureState::Running;
         let (rec_enabled, rec_text, play_enabled, play_text, note) = match &sh.record {
-            RecordState::Idle => (running, format!("● Record {RECORD_SECS} s"), false, "▶ Play back", String::new()),
-            RecordState::Recording { frames, target } => {
-                let secs = *frames as f32 / (*target as f32 / RECORD_SECS as f32);
-                (false, "● Recording…".into(), false, "▶ Play back", format!("{secs:.1} / {RECORD_SECS} s"))
+            RecordState::Idle => (running, "● Record".to_string(), false, "▶ Play back", String::new()),
+            RecordState::Recording { frames, .. } => {
+                let secs = *frames as f32 / sh.rate() as f32;
+                (true, "■ Stop recording".into(), false, "▶ Play back", format!("Recording… {secs:.1} s"))
             }
-            RecordState::Recorded => (running, format!("● Record {RECORD_SECS} s"), true, "▶ Play back", "Recorded".into()),
-            RecordState::Playing => (false, format!("● Record {RECORD_SECS} s"), true, "■ Stop", "Playing…".into()),
-            RecordState::Error(e) => (running, format!("● Record {RECORD_SECS} s"), sh.has_recording(), "▶ Play back", e.clone()),
+            RecordState::Recorded => (running, "● Record".to_string(), true, "▶ Play back", format!("Recorded {:.1} s", sh.recorded_secs())),
+            RecordState::Playing => (false, "● Record".to_string(), true, "■ Stop", "Playing…".into()),
+            RecordState::Error(e) => (running, "● Record".to_string(), sh.has_recording(), "▶ Play back", e.clone()),
         };
         self.record_btn.set_sensitive(rec_enabled);
         self.record_btn.set_label(&rec_text);
