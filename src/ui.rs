@@ -542,9 +542,11 @@ impl Ui {
             .label("Restart")
             .tooltip_text("Restart the audio session manager, retry Bluetooth connections and reconnect to the audio server")
             .build();
+        restart_btn.add_css_class("destructive-action");
         header.pack_start(&restart_btn);
         let rescan_btn = gtk::Button::with_label("Rescan");
         bind_scan_button(&rescan_btn, "Rescan");
+        rescan_btn.add_css_class("destructive-action");
         header.pack_start(&rescan_btn);
         toolbar.add_top_bar(&header);
         let banner = adw::Banner::new("");
