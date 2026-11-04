@@ -123,9 +123,21 @@ pub fn scanning() -> bool {
     SCANNING.load(Ordering::SeqCst)
 }
 
+static CANCEL: AtomicBool = AtomicBool::new(false);
+
+/// Ask the running scan to stop; it ends within a fraction of a second.
+pub fn cancel() {
+    CANCEL.store(true, Ordering::SeqCst);
+}
+
+fn cancelled() -> bool {
+    CANCEL.load(Ordering::SeqCst)
+}
+
 /// Run a scan on a background thread unless one is already running.
 pub fn start_scan() {
     if !SCANNING.swap(true, Ordering::SeqCst) {
+        CANCEL.store(false, Ordering::SeqCst);
         std::thread::spawn(|| {
             run();
             SCANNING.store(false, Ordering::SeqCst);
@@ -142,6 +154,21 @@ const CONNECT_SECS: &str = "5";
 
 /// Pause between failed attempts on one device.
 const RETRY_PAUSE: Duration = Duration::from_millis(300);
+
+/// Run `child` to completion, killing it early if the scan is cancelled.
+fn wait_unless_cancelled(mut child: std::process::Child) {
+    loop {
+        match child.try_wait() {
+            Ok(None) if !cancelled() => std::thread::sleep(Duration::from_millis(50)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+            _ => return,
+        }
+    }
+}
 
 /// Connect remembered devices that are not connected. Blocking.
 /// Aggressive: the adapter is powered on and put in discovery (so BlueZ can
@@ -170,14 +197,24 @@ pub fn run() {
     std::thread::scope(|scope| {
         for d in &pending {
             scope.spawn(move || {
-                while Instant::now() < deadline {
+                while Instant::now() < deadline && !cancelled() {
                     if is_connected(&d.mac) {
                         return;
                     }
-                    let _ = crate::hostcmd::command("bluetoothctl")
+                    if let Ok(child) = crate::hostcmd::command("bluetoothctl")
                         .args(["--timeout", CONNECT_SECS, "connect", &d.mac])
-                        .output();
-                    std::thread::sleep(RETRY_PAUSE);
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                    {
+                        wait_unless_cancelled(child);
+                    }
+                    // Sleep in slices so a cancel is noticed quickly.
+                    let until = Instant::now() + RETRY_PAUSE;
+                    while Instant::now() < until && !cancelled() {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
                 }
             });
         }

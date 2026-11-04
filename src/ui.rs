@@ -304,16 +304,22 @@ pub fn build(app: &adw::Application, background: bool) {
     });
 }
 
-/// Make `b` start a Bluetooth scan and stay disabled while it runs.
+/// Make `b` start a Bluetooth scan; while it runs the button becomes "Cancel".
 fn bind_scan_button(b: &gtk::Button, idle_label: &'static str) {
-    b.set_tooltip_text(Some("Try to connect remembered Bluetooth audio devices (checks every second for 30 seconds)"));
+    b.set_tooltip_text(Some("Try to connect remembered Bluetooth audio devices (up to 15 seconds; click again to cancel)"));
     b.connect_clicked(move |b| {
-        crate::reconnect::start_scan();
-        crate::chime::play_loop();
-        b.set_sensitive(false);
-        b.set_label("Scanning…");
+        if crate::reconnect::scanning() {
+            // Also covers scans started elsewhere (tray, startup, restart).
+            crate::reconnect::cancel();
+            b.set_sensitive(false);
+            b.set_label("Cancelling…");
+        } else {
+            crate::reconnect::start_scan();
+            crate::chime::play_loop();
+            b.set_label("Cancel scan");
+        }
         let b = b.clone();
-        gtk::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+        gtk::glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
             if crate::reconnect::scanning() {
                 gtk::glib::ControlFlow::Continue
             } else {
