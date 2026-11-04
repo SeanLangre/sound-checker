@@ -8,8 +8,8 @@
 
 use std::fs;
 use std::io;
+use std::process::Stdio;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -82,7 +82,7 @@ pub fn remember(seen: &[Known]) {
 }
 
 fn bluetoothctl(args: &[&str]) -> String {
-    Command::new("bluetoothctl")
+    crate::hostcmd::command("bluetoothctl")
         .args(args)
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
@@ -133,33 +133,59 @@ pub fn start_scan() {
     }
 }
 
-/// How long a scan keeps trying, checking once per second.
-const SCAN_SECS: u64 = 30;
+/// How long a scan keeps trying. Short on purpose: it runs when the user
+/// clicks Rescan or the app starts, and headphones that are off give up.
+const SCAN_SECS: u64 = 15;
+
+/// Longest a single `connect` attempt may take.
+const CONNECT_SECS: &str = "5";
+
+/// Pause between failed attempts on one device.
+const RETRY_PAUSE: Duration = Duration::from_millis(300);
 
 /// Connect remembered devices that are not connected. Blocking.
-/// Checks every second for 30 seconds: the adapter may still be powering up,
-/// and headphones that are off simply refuse until they are switched on.
+/// Aggressive: the adapter is powered on and put in discovery (so BlueZ can
+/// see devices it has not heard from lately), and every device is retried in
+/// its own thread, back to back, until it connects or the time is up.
 pub fn run() {
-    let mut pending = load().unwrap_or_else(|| {
+    let pending = load().unwrap_or_else(|| {
         let s = seed();
         let _ = save(&s);
         s
     });
+    if pending.is_empty() {
+        return;
+    }
+    let _ = crate::hostcmd::command("bluetoothctl").args(["power", "on"]).output();
     let deadline = Instant::now() + Duration::from_secs(SCAN_SECS);
-    loop {
-        let started = Instant::now();
-        pending.retain(|d| !is_connected(&d.mac));
-        if pending.is_empty() {
-            return;
-        }
+
+    let mut discovery = crate::hostcmd::command("bluetoothctl")
+        .args(["--timeout", &SCAN_SECS.to_string(), "scan", "on"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok();
+
+    std::thread::scope(|scope| {
         for d in &pending {
-            let _ = Command::new("bluetoothctl").args(["--timeout", "3", "connect", &d.mac]).output();
+            scope.spawn(move || {
+                while Instant::now() < deadline {
+                    if is_connected(&d.mac) {
+                        return;
+                    }
+                    let _ = crate::hostcmd::command("bluetoothctl")
+                        .args(["--timeout", CONNECT_SECS, "connect", &d.mac])
+                        .output();
+                    std::thread::sleep(RETRY_PAUSE);
+                }
+            });
         }
-        let next = started + Duration::from_secs(1);
-        if next >= deadline {
-            return;
-        }
-        std::thread::sleep(next.saturating_duration_since(Instant::now()));
+    });
+
+    if let Some(child) = discovery.as_mut() {
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 

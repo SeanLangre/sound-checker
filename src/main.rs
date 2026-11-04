@@ -3,6 +3,7 @@ mod autostart;
 mod analysis;
 mod capture;
 mod chime;
+mod hostcmd;
 #[cfg(test)]
 mod fuzz;
 mod names;

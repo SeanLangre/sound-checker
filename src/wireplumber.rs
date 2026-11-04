@@ -6,7 +6,6 @@
 use std::fs;
 use std::io;
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -142,7 +141,7 @@ pub fn write_all(entries: &[DisabledEntry]) -> io::Result<()> {
 
 /// Whether a `wireplumber` systemd user unit exists to restart.
 pub fn can_restart() -> bool {
-    Command::new("systemctl")
+    crate::hostcmd::command("systemctl")
         .args(["--user", "cat", "wireplumber.service"])
         .output()
         .is_ok_and(|o| o.status.success())
@@ -150,7 +149,7 @@ pub fn can_restart() -> bool {
 
 /// MAC addresses of currently connected Bluetooth devices.
 fn connected_bluetooth() -> Vec<String> {
-    let Ok(out) = Command::new("bluetoothctl").args(["devices", "Connected"]).output() else {
+    let Ok(out) = crate::hostcmd::command("bluetoothctl").args(["devices", "Connected"]).output() else {
         return Vec::new();
     };
     parse_devices(&String::from_utf8_lossy(&out.stdout))
@@ -165,14 +164,14 @@ fn parse_devices(text: &str) -> Vec<String> {
 }
 
 fn is_connected(mac: &str) -> bool {
-    Command::new("bluetoothctl")
+    crate::hostcmd::command("bluetoothctl")
         .args(["info", mac])
         .output()
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("Connected: yes"))
 }
 
 fn pactl(args: &[&str]) -> String {
-    Command::new("pactl")
+    crate::hostcmd::command("pactl")
         .args(args)
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -253,9 +252,9 @@ fn restore_profiles(before: &Routing, allow_reconnect: bool) -> Vec<String> {
             changed.push(format!("set-card-profile {card} {want}"));
         } else if allow_reconnect && card.starts_with("bluez_card.") {
             let mac = card.trim_start_matches("bluez_card.").replace('_', ":");
-            let _ = Command::new("bluetoothctl").args(["disconnect", &mac]).output();
+            let _ = crate::hostcmd::command("bluetoothctl").args(["disconnect", &mac]).output();
             std::thread::sleep(std::time::Duration::from_secs(3));
-            let _ = Command::new("bluetoothctl").args(["connect", &mac]).output();
+            let _ = crate::hostcmd::command("bluetoothctl").args(["connect", &mac]).output();
             std::thread::sleep(std::time::Duration::from_secs(4));
             pactl(&["set-card-profile", card, want]);
             changed.push(format!("reconnected {mac}, set-card-profile {card} {want}"));
@@ -312,7 +311,7 @@ pub fn restart() -> Result<(), String> {
     let before = connected_bluetooth();
     let saved = routing();
     log(&format!("restart: default sink {:?}, source {:?}, {} playback and {} capture streams", saved.sink, saved.source, saved.playback.len(), saved.capture.len()));
-    let out = Command::new("systemctl")
+    let out = crate::hostcmd::command("systemctl")
         .args(["--user", "restart", "wireplumber.service"])
         .output()
         .map_err(|e| e.to_string())?;
@@ -331,7 +330,7 @@ pub fn restart() -> Result<(), String> {
         // Give devices a moment to come back by themselves first.
         std::thread::sleep(std::time::Duration::from_secs(1));
         for mac in before.iter().filter(|m| !is_connected(m)) {
-            let _ = Command::new("bluetoothctl").args(["connect", mac]).output();
+            let _ = crate::hostcmd::command("bluetoothctl").args(["connect", mac]).output();
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
         let mut changed = restore_profiles(&saved, false);

@@ -2,7 +2,7 @@
 //! device audio is going to after a restart or rescan.
 
 use std::f32::consts::TAU;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -123,7 +123,7 @@ pub fn play_loop() {
         let deadline = Instant::now() + Duration::from_secs(LOOP_SECS);
         let mut player = 0;
         while current() && Instant::now() < deadline {
-            let child = Command::new(["paplay", "pw-play"][player])
+            let child = crate::hostcmd::command(["paplay", "pw-play"][player])
                 .arg(&path)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
