@@ -408,4 +408,70 @@ mod tests {
         a.process(&[0.1, 0.1, 0.1]);
         assert_eq!(a.snapshot().status, Status::Waiting);
     }
+
+    #[test]
+    fn fuzz_analyzer_survives_hostile_input() {
+        use crate::fuzz::{iters, Rng};
+        let mut rng = Rng::new(1);
+        for case in 0..iters(300) {
+            let channels = *rng.pick(&[0usize, 1, 2, 3, 6, 8, 64]);
+            let rate = *rng.pick(&[0u32, 1, 7, 8000, 44100, 48000, 192000, u32::MAX]);
+            let mut a = Analyzer::new(channels, rate);
+            let ch = channels.max(1);
+            let finite_only = rng.chance(50);
+            for _ in 0..rng.below(20) {
+                // Chunks that are not frame-aligned, empty, or large.
+                let len = rng.below(6000);
+                let mode = rng.below(4);
+                let samples: Vec<f32> = (0..len)
+                    .map(|_| match mode {
+                        0 => 0.0,
+                        1 => rng.unit(),
+                        2 => rng.unit() * 4.0,
+                        _ => rng.nasty_f32(),
+                    })
+                    .map(|s| if finite_only && !s.is_finite() { 0.5 } else { s })
+                    .collect();
+                a.process(&samples);
+                let snap = a.snapshot();
+                assert_eq!(snap.channels.len(), ch, "case {case}");
+                assert!(a.waveform().count() <= WAVEFORM_COLUMNS, "case {case}");
+                assert!(snap.rms_db.is_nan() == false, "NaN rms, case {case}");
+                for c in &snap.channels {
+                    assert!(!c.peak_db.is_nan() && !c.rms_db.is_nan() && !c.held_peak_db.is_nan(), "NaN level, case {case}");
+                    assert!(c.peak_db >= FLOOR_DB && c.rms_db >= FLOOR_DB, "case {case}");
+                }
+                if finite_only {
+                    assert!(snap.rms_db.is_finite(), "case {case}");
+                }
+                if let Status::DeadChannel(i) = snap.status {
+                    assert!(i < ch && ch > 1, "case {case}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fuzz_chunking_does_not_change_results() {
+        use crate::fuzz::{iters, Rng};
+        let mut rng = Rng::new(2);
+        for case in 0..iters(100) {
+            let channels = rng.below(4) + 1;
+            let samples: Vec<f32> = (0..rng.below(20_000) * channels).map(|_| rng.unit() * 0.9).collect();
+            let mut whole = Analyzer::new(channels, 48000);
+            whole.process(&samples);
+            let mut split = Analyzer::new(channels, 48000);
+            let mut rest = &samples[..];
+            while !rest.is_empty() {
+                // Cut on frame boundaries; the app relies on aligned chunks.
+                let n = ((rng.below(3000) + 1) * channels).min(rest.len());
+                split.process(&rest[..n]);
+                rest = &rest[n..];
+            }
+            let (w, s) = (whole.snapshot(), split.snapshot());
+            assert_eq!(w.rms_db, s.rms_db, "case {case}");
+            assert_eq!(w.status, s.status, "case {case}");
+            assert_eq!(whole.waveform().collect::<Vec<_>>(), split.waveform().collect::<Vec<_>>(), "case {case}");
+        }
+    }
 }

@@ -21,7 +21,16 @@ fn quote(path: &str) -> String {
         if matches!(c, '"' | '`' | '$' | '\\') {
             out.push('\\');
         }
-        out.push(c);
+        // `%` starts a field code (%f, %u, ...) unless doubled.
+        if c == '%' {
+            out.push('%');
+        }
+        // A raw line break would end the Exec line and start new keys.
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
     }
     out.push('"');
     out
@@ -69,5 +78,31 @@ mod tests {
     fn exec_line_is_quoted() {
         let c = contents("/home/a b/App\"x.AppImage");
         assert!(c.contains("Exec=\"/home/a b/App\\\"x.AppImage\" --background\n"));
+    }
+
+    #[test]
+    fn fuzz_exec_quoting_is_safe_for_any_path() {
+        use crate::fuzz::{iters, Rng};
+        let mut rng = Rng::new(10);
+        for case in 0..iters(5000) {
+            let path = rng.string(20);
+            let entry = contents(&path);
+            // The Exec line must stay a single line of the file.
+            let exec: Vec<&str> = entry.lines().filter(|l| l.starts_with("Exec=")).collect();
+            assert_eq!(exec.len(), 1, "case {case}: path {path:?} injected/broke lines");
+            // No stray keys injected via the path.
+            assert_eq!(entry.lines().count(), 8, "case {case}: path {path:?}");
+            // Desktop-entry field codes (%f, %u, ...) must be neutralised.
+            let line = exec[0];
+            let bytes = line.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'%' {
+                    assert_eq!(bytes.get(i + 1), Some(&b'%'), "case {case}: unescaped % in {line:?}");
+                    i += 1;
+                }
+                i += 1;
+            }
+        }
     }
 }

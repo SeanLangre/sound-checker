@@ -19,3 +19,7 @@ ksni = { version = "0.3.7", features = ["blocking"] }
 # inside the binding's own conversion before our code sees the value.
 [profile.dev.package.libpulse-binding]
 debug-assertions = false
+
+[profile.release]
+strip = "symbols"
+debug = false

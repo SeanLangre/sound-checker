@@ -197,4 +197,56 @@ mod tests {
         assert!(is_audio("\tIcon: audio-headset\n"));
         assert!(!is_audio("\tIcon: phone\n"));
     }
+
+    #[test]
+    fn fuzz_parsers_never_panic_and_stay_well_formed() {
+        use crate::fuzz::{iters, Rng};
+        let mut rng = Rng::new(5);
+        for case in 0..iters(5000) {
+            let text = rng.string(40);
+            for d in parse_devices(&text) {
+                assert!(!d.mac.contains(' '), "case {case}");
+                assert_eq!(d.name, d.name.trim(), "case {case}");
+            }
+            let _ = is_audio(&text);
+            if let Some(mac) = mac_from_card_name(&text) {
+                let parts: Vec<&str> = mac.split(':').collect();
+                assert_eq!(parts.len(), 6);
+                assert!(parts.iter().all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase())));
+            }
+        }
+        // Valid names must always convert.
+        for _ in 0..iters(500) {
+            let hex: Vec<String> = (0..6).map(|_| format!("{:02x}", rng.below(256))).collect();
+            let mac = mac_from_card_name(&format!("bluez_card.{}", hex.join("_"))).expect("valid card name");
+            assert_eq!(mac, hex.join(":").to_uppercase());
+        }
+    }
+
+    #[test]
+    fn fuzz_merge_is_idempotent_and_keeps_macs_unique() {
+        use crate::fuzz::{iters, Rng};
+        let mut rng = Rng::new(6);
+        let mk = |rng: &mut Rng| -> Vec<Known> {
+            let mut v: Vec<Known> = (0..rng.below(8)).map(|_| k(&format!("M{}", rng.below(5)), &format!("n{}", rng.below(3)))).collect();
+            // A device list from the server has one entry per MAC.
+            v.sort_by(|a, b| a.mac.cmp(&b.mac));
+            v.dedup_by(|a, b| a.mac == b.mac);
+            v
+        };
+        for case in 0..iters(2000) {
+            let mut list: Vec<Known> = Vec::new();
+            merge(&mut list, &mk(&mut rng));
+            let seen = mk(&mut rng);
+            merge(&mut list, &seen);
+            let snapshot = list.clone();
+            assert!(!merge(&mut list, &seen), "second merge must be a no-op, case {case}");
+            assert_eq!(list, snapshot);
+            let mut macs: Vec<_> = list.iter().map(|k| &k.mac).collect();
+            macs.sort();
+            let n = macs.len();
+            macs.dedup();
+            assert_eq!(n, macs.len(), "duplicate MACs, case {case}");
+        }
+    }
 }

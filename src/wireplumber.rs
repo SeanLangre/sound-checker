@@ -400,4 +400,70 @@ mod tests {
         let json = serde_json::to_vec(&e).unwrap();
         assert_eq!(serde_json::from_slice::<Vec<DisabledEntry>>(&json).unwrap(), e);
     }
+
+    /// Inverse of `quote`, as an SPA-JSON reader would see it.
+    fn unquote(q: &str) -> Option<String> {
+        let inner = q.strip_prefix('"')?.strip_suffix('"')?;
+        let mut out = String::new();
+        let mut it = inner.chars();
+        while let Some(c) = it.next() {
+            match c {
+                '\\' => match it.next()? {
+                    'n' => out.push('\n'),
+                    c @ ('"' | '\\') => out.push(c),
+                    _ => return None,
+                },
+                '"' => return None, // unescaped quote would end the string early
+                c => out.push(c),
+            }
+        }
+        Some(out)
+    }
+
+    #[test]
+    fn fuzz_quote_round_trips_and_cannot_break_out() {
+        use crate::fuzz::{iters, Rng};
+        let mut rng = Rng::new(7);
+        for case in 0..iters(5000) {
+            let s = rng.string(30);
+            let q = quote(&s);
+            assert_eq!(unquote(&q).as_deref(), Some(s.as_str()), "case {case}: {s:?}");
+            assert!(!q.contains('\n'), "raw newline in {q:?}");
+        }
+    }
+
+    #[test]
+    fn fuzz_generate_config_has_one_rule_per_entry() {
+        use crate::fuzz::{iters, Rng};
+        let mut rng = Rng::new(8);
+        for case in 0..iters(1000) {
+            let entries: Vec<DisabledEntry> = (0..rng.below(6))
+                .map(|_| DisabledEntry {
+                    node_name: if rng.chance(30) { format!("bluez_{}", rng.string(8)) } else { rng.string(12) },
+                    device_name: None,
+                    description: rng.string(8),
+                    bus: if rng.chance(30) { Some("bluetooth".into()) } else { None },
+                    disabled_at: rng.u64(),
+                    output: rng.chance(50),
+                })
+                .collect();
+            match generate_config(&entries) {
+                None => assert!(entries.is_empty()),
+                Some(cfg) => {
+                    assert_eq!(cfg.matches("node.disabled = true").count(), entries.len(), "case {case}");
+                }
+            }
+            let json = serde_json::to_vec(&entries).unwrap();
+            assert_eq!(serde_json::from_slice::<Vec<DisabledEntry>>(&json).unwrap(), entries);
+        }
+    }
+
+    #[test]
+    fn fuzz_bluetoothctl_parser_never_panics() {
+        use crate::fuzz::{iters, Rng};
+        let mut rng = Rng::new(9);
+        for _ in 0..iters(5000) {
+            let _ = parse_devices(&rng.string(40));
+        }
+    }
 }

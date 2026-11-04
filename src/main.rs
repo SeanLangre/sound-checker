@@ -3,6 +3,8 @@ mod autostart;
 mod analysis;
 mod capture;
 mod chime;
+#[cfg(test)]
+mod fuzz;
 mod names;
 mod priority;
 mod pulse;

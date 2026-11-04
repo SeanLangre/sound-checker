@@ -117,4 +117,54 @@ mod tests {
         shift(&mut list, &v(&["a", "b"]), "b", false);
         assert_eq!(list, v(&["a", "b"]));
     }
+
+    #[test]
+    fn fuzz_shift_and_best_keep_invariants() {
+        use crate::fuzz::{iters, Rng};
+        let pool: Vec<String> = (0..8).map(|i| format!("dev{i}")).collect();
+        let mut rng = Rng::new(3);
+        for case in 0..iters(2000) {
+            let mut list: Vec<String> = Vec::new();
+            for p in &pool {
+                if rng.chance(40) {
+                    list.insert(rng.below(list.len() + 1), p.clone());
+                }
+            }
+            let visible: Vec<String> = pool.iter().filter(|_| rng.chance(60)).cloned().collect();
+            let name = if rng.chance(90) { rng.pick(&pool).clone() } else { "ghost".to_string() };
+            let before = list.clone();
+            shift(&mut list, &visible, &name, rng.chance(50));
+
+            let mut a: Vec<_> = before.iter().chain(visible.iter().filter(|v| !before.contains(v))).cloned().collect();
+            let mut b = list.clone();
+            a.sort();
+            b.sort();
+            assert_eq!(a, b, "shift must only reorder (and append visible), case {case}");
+            let mut dedup = b.clone();
+            dedup.dedup();
+            assert_eq!(dedup, b, "no duplicates, case {case}");
+
+            let cands: Vec<&str> = visible.iter().map(String::as_str).collect();
+            match best(&list, cands.iter().copied()) {
+                Some(c) => {
+                    assert!(cands.contains(&c));
+                    assert!(cands.iter().all(|o| rank(&list, o) >= rank(&list, c)));
+                }
+                None => assert!(cands.iter().all(|c| !list.contains(&c.to_string()))),
+            }
+        }
+    }
+
+    #[test]
+    fn fuzz_state_files_never_panic() {
+        use crate::fuzz::{iters, Rng};
+        let mut rng = Rng::new(4);
+        for _ in 0..iters(2000) {
+            let b = rng.bytes(200);
+            let _ = serde_json::from_slice::<Priorities>(&b);
+            let _ = serde_json::from_slice::<crate::names::Names>(&b);
+            let _ = serde_json::from_slice::<Vec<crate::reconnect::Known>>(&b);
+            let _ = serde_json::from_slice::<Vec<crate::wireplumber::DisabledEntry>>(&b);
+        }
+    }
 }

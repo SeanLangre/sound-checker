@@ -14,11 +14,23 @@ LIBDIR="$APPDIR/usr/lib"
 EXCLUDE='^(linux-vdso|ld-linux.*|libc|libm|libdl|libpthread|librt|libresolv|libutil|libnsl|libGL|libGLX|libGLdispatch|libEGL|libgbm|libdrm|libvulkan|libudev|libsystemd)\.so'
 
 cd "$ROOT"
-cargo build --release --locked
+
+# Keep build-host details (username, home dir, project path, toolchain paths)
+# out of the binary: remap every absolute path rustc embeds in panic/debug info.
+REMAPS=(
+    "--remap-path-prefix=$ROOT=/build/sound-checker"
+    "--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/build/cargo"
+    "--remap-path-prefix=${RUSTUP_HOME:-$HOME/.rustup}=/build/rustup"
+    "--remap-path-prefix=$HOME=/build/home"
+)
+RUSTFLAGS="${REMAPS[*]}" cargo build --release --locked
 
 rm -rf "$BUILD"
 mkdir -p "$APPDIR/usr/bin" "$LIBDIR" "$APPDIR/usr/share/glib-2.0/schemas"
 install -m755 target/release/sound-checker "$APPDIR/usr/bin/sound-checker"
+# Drop symbols and the toolchain/linker identification comment.
+strip --strip-all --remove-section=.comment --remove-section=.note.gnu.build-id \
+    "$APPDIR/usr/bin/sound-checker"
 
 # Bundle shared libraries (transitively).
 bundle_libs() {
@@ -47,11 +59,12 @@ bundle_libs "$LIBDIR"/gdk-pixbuf/loaders/*.so "$LIBDIR"/gio/modules/*.so
 rm -f "$LIBDIR"/gio/modules/*.cache
 
 # Schemas, icon theme.
-cp /usr/share/glib-2.0/schemas/*.xml "$APPDIR/usr/share/glib-2.0/schemas/"
-cp /usr/share/glib-2.0/schemas/*.override "$APPDIR/usr/share/glib-2.0/schemas/" 2>/dev/null || true
+# Only generic GTK/GNOME schemas -- not the host's other installed apps/desktop.
+cp /usr/share/glib-2.0/schemas/org.gtk.*.xml /usr/share/glib-2.0/schemas/org.gnome.desktop.*.xml \
+    "$APPDIR/usr/share/glib-2.0/schemas/"
 glib-compile-schemas "$APPDIR/usr/share/glib-2.0/schemas"
 mkdir -p "$APPDIR/usr/share/icons"
-cp -r /usr/share/icons/Adwaita /usr/share/icons/hicolor "$APPDIR/usr/share/icons/"
+cp -r /usr/share/icons/Adwaita "$APPDIR/usr/share/icons/"
 
 # Desktop entry + icon.
 sed "s/^Icon=.*/Icon=$APP_ID/" "packaging/$APP_ID.desktop" > "$APPDIR/$APP_ID.desktop"
@@ -77,5 +90,9 @@ RUN
 chmod +x "$APPDIR/AppRun"
 
 OUT="$ROOT/Sound-Checker-x86_64.AppImage"
-ARCH=x86_64 appimagetool "$APPDIR" "$OUT"
+# Normalise ownership/timestamps so the squashfs doesn't carry the build user.
+export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT" log -1 --format=%ct 2>/dev/null || echo 1700000000)}"
+find "$APPDIR" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
+ARCH=x86_64 appimagetool --mksquashfs-opt -all-root "$APPDIR" "$OUT" 2>/dev/null \
+    || ARCH=x86_64 appimagetool "$APPDIR" "$OUT"
 echo "Built $OUT"
