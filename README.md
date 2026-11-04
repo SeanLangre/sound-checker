@@ -37,6 +37,9 @@ GTK main loop (UI thread)
 │                   green/grey row colouring (like pavucontrol's level bars)
 ├── src/analysis.rs per-block peak/RMS, clip/silence/dead-channel detection,
 │                   waveform decimation (pure, unit-tested)
+├── src/tray.rs     StatusNotifierItem tray icon (own thread, via ksni); the
+│                   icon is drawn in code as a pixmap: blue badge with a white
+│                   waveform, so no icon file or theme lookup is needed
 └── src/ui.rs       device list, meters, waveform; redraws from a
                     frame-synced tick callback
 ```
