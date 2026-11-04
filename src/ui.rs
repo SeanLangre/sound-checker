@@ -205,6 +205,11 @@ struct Ui {
 }
 
 const CSS: &str = "
+button.jingle-flash { animation: jingle-flash 2.4s ease-in-out infinite; }
+@keyframes jingle-flash {
+  0%, 100% { background-color: alpha(currentColor, 0.1); }
+  50% { background-color: #f6d32d; color: #241f31; }
+}
 row.src-active {
   background-color: alpha(mix(@success_bg_color, #808080, 0.55), 0.35);
   transition: none;
@@ -304,6 +309,7 @@ fn bind_scan_button(b: &gtk::Button, idle_label: &'static str) {
     b.set_tooltip_text(Some("Try to connect remembered Bluetooth audio devices (checks every second for 30 seconds)"));
     b.connect_clicked(move |b| {
         crate::reconnect::start_scan();
+        crate::chime::play_loop();
         b.set_sensitive(false);
         b.set_label("Scanning…");
         let b = b.clone();
@@ -548,6 +554,21 @@ impl Ui {
         bind_scan_button(&rescan_btn, "Rescan");
         rescan_btn.add_css_class("destructive-action");
         header.pack_start(&rescan_btn);
+        let stop_btn = gtk::Button::with_label("Stop jingle");
+        stop_btn.set_tooltip_text(Some("Stop the test jingle"));
+        stop_btn.connect_clicked(|_| crate::chime::stop());
+        header.pack_start(&stop_btn);
+        // Flash slowly while the jingle plays.
+        let weak_btn = stop_btn.downgrade();
+        glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+            let Some(b) = weak_btn.upgrade() else { return glib::ControlFlow::Break };
+            if crate::chime::playing() {
+                b.add_css_class("jingle-flash");
+            } else {
+                b.remove_css_class("jingle-flash");
+            }
+            glib::ControlFlow::Continue
+        });
         toolbar.add_top_bar(&header);
         let banner = adw::Banner::new("");
         toolbar.add_top_bar(&banner);
@@ -642,6 +663,7 @@ impl Ui {
             return;
         }
         self.restart_btn.set_sensitive(false);
+        crate::chime::play_loop();
         self.banner.set_title("Restarting audio…");
         self.banner.set_revealed(true);
         let can_restart = self.state.borrow().can_restart;

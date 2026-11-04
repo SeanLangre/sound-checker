@@ -2,6 +2,7 @@ mod activity;
 mod autostart;
 mod analysis;
 mod capture;
+mod chime;
 mod names;
 mod priority;
 mod pulse;
