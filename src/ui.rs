@@ -195,6 +195,7 @@ struct Ui {
     disable_btn: gtk::Button,
     banner: adw::Banner,
     toasts: adw::ToastOverlay,
+    restart_btn: gtk::Button,
 
     meter_data: Rc<RefCell<MeterData>>,
     wave_data: Rc<RefCell<Vec<(f32, f32)>>>,
@@ -298,6 +299,26 @@ pub fn build(app: &adw::Application, background: bool) {
     });
 }
 
+/// Make `b` start a Bluetooth scan and stay disabled while it runs.
+fn bind_scan_button(b: &gtk::Button, idle_label: &'static str) {
+    b.set_tooltip_text(Some("Try to connect remembered Bluetooth audio devices (checks every second for 30 seconds)"));
+    b.connect_clicked(move |b| {
+        crate::reconnect::start_scan();
+        b.set_sensitive(false);
+        b.set_label("Scanning…");
+        let b = b.clone();
+        gtk::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+            if crate::reconnect::scanning() {
+                gtk::glib::ControlFlow::Continue
+            } else {
+                b.set_label(idle_label);
+                b.set_sensitive(true);
+                gtk::glib::ControlFlow::Break
+            }
+        });
+    });
+}
+
 /// Header-bar settings menu with the start-at-login switch.
 fn autostart_menu() -> gtk::MenuButton {
     let row = gtk::Box::builder().spacing(12).margin_top(8).margin_bottom(8).margin_start(8).margin_end(8).build();
@@ -314,22 +335,7 @@ fn autostart_menu() -> gtk::MenuButton {
         gtk::glib::Propagation::Proceed
     });
     let scan = gtk::Button::with_label("Scan for Bluetooth devices");
-    scan.set_tooltip_text(Some("Try to connect remembered Bluetooth audio devices (retries for about 80 seconds)"));
-    scan.connect_clicked(|b| {
-        crate::reconnect::start_scan();
-        b.set_sensitive(false);
-        b.set_label("Scanning…");
-        let b = b.clone();
-        gtk::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
-            if crate::reconnect::scanning() {
-                gtk::glib::ControlFlow::Continue
-            } else {
-                b.set_label("Scan for Bluetooth devices");
-                b.set_sensitive(true);
-                gtk::glib::ControlFlow::Break
-            }
-        });
-    });
+    bind_scan_button(&scan, "Scan for Bluetooth devices");
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.append(&row);
     content.append(&scan);
@@ -531,6 +537,15 @@ impl Ui {
         let header = adw::HeaderBar::new();
         header.set_title_widget(Some(&switcher));
         header.pack_end(&autostart_menu());
+        let restart_btn = gtk::Button::builder()
+            .icon_name("view-refresh-symbolic")
+            .label("Restart")
+            .tooltip_text("Restart the audio session manager, retry Bluetooth connections and reconnect to the audio server")
+            .build();
+        header.pack_start(&restart_btn);
+        let rescan_btn = gtk::Button::with_label("Rescan");
+        bind_scan_button(&rescan_btn, "Rescan");
+        header.pack_start(&rescan_btn);
         toolbar.add_top_bar(&header);
         let banner = adw::Banner::new("");
         toolbar.add_top_bar(&banner);
@@ -581,6 +596,7 @@ impl Ui {
             disable_btn,
             banner,
             toasts,
+            restart_btn: restart_btn.clone(),
             meter_data: Rc::new(RefCell::new(MeterData::default())),
             wave_data: Rc::new(RefCell::new(Vec::new())),
             meter_for: RefCell::new(None),
@@ -608,7 +624,44 @@ impl Ui {
                 ui.connect();
             }
         });
+        let weak = Rc::downgrade(&ui);
+        restart_btn.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.restart_all();
+            }
+        });
         ui
+    }
+
+    /// Restart WirePlumber (re-enumerates internal and Bluetooth audio), retry
+    /// Bluetooth connections, then reconnect this window to the audio server.
+    fn restart_all(self: &Rc<Self>) {
+        if !self.restart_btn.is_sensitive() {
+            return;
+        }
+        self.restart_btn.set_sensitive(false);
+        self.banner.set_title("Restarting audio…");
+        self.banner.set_revealed(true);
+        let can_restart = self.state.borrow().can_restart;
+        // Captures hold streams on devices that are about to vanish.
+        self.state.borrow_mut().captures.clear();
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let result = gtk::gio::spawn_blocking(move || {
+                if can_restart { wireplumber::restart() } else { Ok(()) }
+            })
+            .await
+            .unwrap_or_else(|_| Err("restart task panicked".into()));
+            let Some(ui) = weak.upgrade() else { return };
+            crate::reconnect::start_scan();
+            ui.connect();
+            ui.banner.set_revealed(false);
+            ui.restart_btn.set_sensitive(true);
+            ui.toast(&match result {
+                Ok(()) => "Audio restarted; retrying Bluetooth devices in the background".to_string(),
+                Err(e) => format!("Restart failed: {e}"),
+            });
+        });
     }
 
     /// Raise the window, reconnecting to the audio server if it was hidden.

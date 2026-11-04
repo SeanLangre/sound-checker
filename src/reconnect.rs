@@ -11,7 +11,7 @@ use std::io;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -133,27 +133,33 @@ pub fn start_scan() {
     }
 }
 
+/// How long a scan keeps trying, checking once per second.
+const SCAN_SECS: u64 = 30;
+
 /// Connect remembered devices that are not connected. Blocking.
-/// Retries for about 80 seconds: the adapter may still be powering up, and
-/// headphones that are off simply refuse until they are switched on.
+/// Checks every second for 30 seconds: the adapter may still be powering up,
+/// and headphones that are off simply refuse until they are switched on.
 pub fn run() {
-    let list = load().unwrap_or_else(|| {
+    let mut pending = load().unwrap_or_else(|| {
         let s = seed();
         let _ = save(&s);
         s
     });
-    let mut pending: Vec<Known> = list;
-    for attempt in 0..8 {
+    let deadline = Instant::now() + Duration::from_secs(SCAN_SECS);
+    loop {
+        let started = Instant::now();
         pending.retain(|d| !is_connected(&d.mac));
         if pending.is_empty() {
             return;
         }
-        if attempt > 0 {
-            std::thread::sleep(Duration::from_secs(10));
-        }
         for d in &pending {
-            let _ = Command::new("bluetoothctl").args(["--timeout", "15", "connect", &d.mac]).output();
+            let _ = Command::new("bluetoothctl").args(["--timeout", "3", "connect", &d.mac]).output();
         }
+        let next = started + Duration::from_secs(1);
+        if next >= deadline {
+            return;
+        }
+        std::thread::sleep(next.saturating_duration_since(Instant::now()));
     }
 }
 
