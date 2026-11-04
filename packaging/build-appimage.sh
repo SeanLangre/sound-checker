@@ -32,13 +32,39 @@ install -m755 target/release/sound-checker "$APPDIR/usr/bin/sound-checker"
 strip --strip-all --remove-section=.comment --remove-section=.note.gnu.build-id \
     "$APPDIR/usr/bin/sound-checker"
 
-# Bundle shared libraries (transitively).
+# Oldest glibc we promise to run on. Anything bundled (or the binary itself)
+# that needs a newer glibc would fail with "GLIBC_x.y not found" on such hosts.
+MAX_GLIBC=2.43
+
+# Highest GLIBC_x.y symbol version an ELF file requires (empty if none).
+glibc_req() {
+    objdump -T "$1" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1
+}
+# True if $1 needs a glibc newer than MAX_GLIBC.
+too_new() {
+    local v
+    v="$(glibc_req "$1")"
+    [[ -n "$v" && "$(printf '%s\n%s\n' "$v" "$MAX_GLIBC" | sort -V | tail -1)" != "$MAX_GLIBC" ]]
+}
+
+if too_new "$APPDIR/usr/bin/sound-checker"; then
+    echo "error: sound-checker needs glibc $(glibc_req "$APPDIR/usr/bin/sound-checker") > $MAX_GLIBC; build on a host with glibc <= $MAX_GLIBC" >&2
+    exit 1
+fi
+
+# Bundle shared libraries (transitively). Libraries needing a glibc newer than
+# MAX_GLIBC are left out so the target system's own copy is used instead.
 bundle_libs() {
     { ldd "$@" 2>/dev/null || true; } | awk '/=> \//{print $3}' | while read -r lib; do
         name="$(basename "$lib")"
-        if [[ ! "$name" =~ $EXCLUDE && ! -e "$LIBDIR/$name" ]]; then
-            cp -L "$lib" "$LIBDIR/$name"
+        if [[ "$name" =~ $EXCLUDE || -e "$LIBDIR/$name" ]]; then
+            continue
         fi
+        if too_new "$lib"; then
+            echo "note: not bundling $name (needs glibc $(glibc_req "$lib") > $MAX_GLIBC)" >&2
+            continue
+        fi
+        cp -L "$lib" "$LIBDIR/$name"
     done
 }
 bundle_libs "$APPDIR/usr/bin/sound-checker"
