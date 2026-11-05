@@ -288,6 +288,12 @@ pub fn build(app: &adw::Application, background: bool) {
         ui.window.present();
     }
 
+    // Ctrl+Q always quits for real.
+    let quit_action = gtk::gio::SimpleAction::new("quit", None);
+    quit_action.connect_activate(|_, _| quit_app());
+    app.add_action(&quit_action);
+    app.set_accels_for_action("app.quit", &["<Control>q"]);
+
     // Closing hides to the tray when there is one; otherwise it quits.
     // Either way every audio stream and the server connection are released.
     let closing = Rc::downgrade(&ui);
@@ -331,6 +337,16 @@ fn bind_scan_button(b: &gtk::Button, idle_label: &'static str) {
     });
 }
 
+/// Release audio resources and exit the application.
+fn quit_app() {
+    if let Some(ui) = UI.with(|u| u.borrow().clone()) {
+        ui.shutdown();
+    }
+    if let Some(app) = gtk::gio::Application::default() {
+        app.quit();
+    }
+}
+
 /// Header-bar settings menu with the start-at-login switch.
 fn autostart_menu() -> gtk::MenuButton {
     let row = gtk::Box::builder().spacing(12).margin_top(8).margin_bottom(8).margin_start(8).margin_end(8).build();
@@ -351,6 +367,11 @@ fn autostart_menu() -> gtk::MenuButton {
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.append(&row);
     content.append(&scan);
+    // Always-reachable way to really quit (closing the window only hides to the
+    // tray, and the tray icon may not be visible on every host).
+    let quit = gtk::Button::with_label("Quit");
+    quit.connect_clicked(|_| quit_app());
+    content.append(&quit);
     gtk::MenuButton::builder()
         .icon_name("open-menu-symbolic")
         .tooltip_text("Settings")

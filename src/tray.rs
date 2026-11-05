@@ -67,7 +67,9 @@ impl ksni::Tray for Tray {
 /// must not hide itself, or it would be unreachable). The handle keeps it alive.
 pub fn start() -> Option<(ksni::blocking::Handle<impl ksni::Tray>, Receiver<Command>)> {
     let (tx, rx) = mpsc::channel();
-    let handle = Tray(tx).spawn().ok()?;
+    // Autostart can launch us before the bar (the tray host) is up; wait for it
+    // and register once it appears instead of failing or never showing.
+    let handle = Tray(tx).assume_sni_available(true).spawn().ok()?;
     Some((handle, rx))
 }
 
